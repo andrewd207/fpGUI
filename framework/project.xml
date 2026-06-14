@@ -8,9 +8,15 @@
     <projectType>library</projectType>
 
     <unitPaths>
-      <!-- These act as inclusion rules based on conditions -->
-      <path condition="LINUX">corelib/x11</path>
-      <path condition="FREEBSD">corelib/x11</path>
+      <!-- These act as inclusion rules based on conditions.
+           On Linux/BSD the X11 and Wayland backends are mutually exclusive
+           (both provide fpg_interface/fpg_impl), and PasBuild conditions have
+           no negation, so the backend is chosen by profile:
+             -p x11      (default Linux/BSD backend)
+             -p wayland  (Wayland backend)
+           Windows/macOS select their backend by platform automatically. -->
+      <path condition="X11">corelib/x11</path>
+      <path condition="WAYLAND">corelib/wayland</path>
       <path condition="WINDOWS">corelib/gdi</path>
       <path condition="DARWIN">corelib/cocoa</path>
       <!-- There are just to clean up the FPC command - not strictly needed -->
@@ -31,9 +37,38 @@
     </frameworkOptions>
   </test>
 
+  <profiles>
+    <profile>
+      <id>x11</id>
+      <defines>
+        <define>X11</define>
+      </defines>
+    </profile>
+    <profile>
+      <id>wayland</id>
+      <defines>
+        <define>WAYLAND</define>
+      </defines>
+    </profile>
+  </profiles>
+
   <!-- only because we want the tool for resource compilation -->
   <moduleDependencies>
     <module>../tools/svg2hvif</module>
   </moduleDependencies>
+
+  <!-- Wayland backend dependencies (only consumed when building with -p wayland).
+       NOTE: PasBuild resolves <dependencies> unconditionally, so these must be
+       installed in the local repository even for X11 builds. -->
+  <dependencies>
+    <dependency>
+      <name>wayland-classes</name>
+      <version>1.0.0</version>
+    </dependency>
+    <dependency>
+      <name>support</name>
+      <version>1.0.0</version>
+    </dependency>
+  </dependencies>
 
 </project>

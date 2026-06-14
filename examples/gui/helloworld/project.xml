@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <name>examples-gui-helloworld</name>
+  <version>1.0.0</version>
+
+  <build>
+    <mainSource>helloworld.lpr</mainSource>
+    <sourceDirectory>.</sourceDirectory>
+    <executableName>helloworld</executableName>
+  </build>
+
+  <dependencies>
+    <dependency>
+      <name>fpgui-framework</name>
+      <version>2.1.0</version>
+    </dependency>
+    <dependency>
+      <name>wayland-classes</name>
+      <version>1.0.0</version>
+    </dependency>
+    <dependency>
+      <name>support</name>
+      <version>1.0.0</version>
+    </dependency>
+  </dependencies>
+</project>
