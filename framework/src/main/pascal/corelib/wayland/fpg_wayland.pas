@@ -286,7 +286,8 @@ type
   end;
 
   TfpgWaylandFileList = class(TfpgFileListBase)
-
+  public
+    procedure   PopulateSpecialDirs(const aDirectory: TfpgString); override;
   end;
 
   TfpgWaylandMimeData = class(TfpgMimeDataBase)
@@ -541,6 +542,25 @@ end;
 procedure TfpgWaylandClipboard.InitClipboard;
 begin
 
+end;
+
+{ TfpgWaylandFileList }
+
+procedure TfpgWaylandFileList.PopulateSpecialDirs(const aDirectory: TfpgString);
+var
+  ds: string;
+begin
+  { Seed the special-dirs list with the root before the base class inserts the
+    path components — the inherited logic assumes a non-empty list (it inserts
+    at index 1) and crashes otherwise. Mirrors the X11 backend. }
+  FSpecialDirs.Clear;
+  FSpecialDirs.Add(DirectorySeparator); // add root
+
+  ds := aDirectory;
+  if Copy(ds, 1, 1) <> DirectorySeparator then
+    ds := DirectorySeparator + ds;
+
+  inherited PopulateSpecialDirs(ds);
 end;
 
 { TfpgWaylandImage }
