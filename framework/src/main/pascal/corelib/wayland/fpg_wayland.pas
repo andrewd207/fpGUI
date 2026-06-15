@@ -212,6 +212,10 @@ type
     FKeyTimer: TObject;
     FShiftState: TShiftState;
     FPopupStack: TFPList;
+    { Buffer managers with a deferred (coalesced) present pending. Flushed once
+      per event-loop pass in DoWaitWindowMessage so the many partial paints
+      fpGUI emits per input event become a single committed frame (no flicker). }
+    FPendingPresents: TFPList;
     { An interactive decoration move/resize grab makes the compositor send a
       keyboard leave/enter pair; suppress the matching deactivate/activate so
       the focused widget keeps its focus during a titlebar drag. }
@@ -245,9 +249,14 @@ type
     procedure   ClosePopups;
     function    WindowInPopupStack(AWindow: TfpgWaylandWindow): Boolean;
     procedure   RemoveWindowFromPopupStack(Awindow: TfpgWaylandWindow);
+    { Present coalescing — see FPendingPresents. The argument is a
+      TWaylandBufferManager (typed as TObject to avoid a unit cycle). }
+    procedure   FlushPendingPresents;
   public
     constructor Create(const AParams: string = ''); virtual;
     destructor  Destroy; override;
+    procedure   QueuePresent(ABufferManager: TObject);
+    procedure   UnqueuePresent(ABufferManager: TObject);
     { Called when fpGUI itself starts an interactive decoration move/resize, so
       the ensuing compositor keyboard-leave does not deactivate the window. }
     procedure   BeginDecorationGrab;
@@ -326,7 +335,7 @@ implementation
 uses
   fpg_cmdlineparams, fpg_main, ctypes, fpg_widget, libharfbuzz,
   wayland_protocol, fpg_stringutils, fpg_popupwindow,
-  fpg_wayland_decorations, agg_basics, process;
+  fpg_wayland_decorations, fpg_wayland_buffer_manager, agg_basics, process;
 
 { Run a command and return its trimmed stdout (with surrounding single quotes
   stripped, as emitted by gsettings). Empty string on any failure. }
@@ -1893,7 +1902,40 @@ end;
 
 procedure TfpgWaylandApplication.DoWaitWindowMessage(atimeoutms: integer);
 begin
+  { fpgDeliverMessages just finished delivering this pass's messages (and their
+    paints, which only accumulated damage). Present each dirty window once, as a
+    single coalesced frame, before we block waiting for the next event. }
+  FlushPendingPresents;
   FDisplay.WaitEvent(atimeoutms);
+end;
+
+procedure TfpgWaylandApplication.QueuePresent(ABufferManager: TObject);
+begin
+  if FPendingPresents.IndexOf(ABufferManager) < 0 then
+    FPendingPresents.Add(ABufferManager);
+end;
+
+procedure TfpgWaylandApplication.UnqueuePresent(ABufferManager: TObject);
+begin
+  if Assigned(FPendingPresents) then
+    FPendingPresents.Remove(ABufferManager);
+end;
+
+procedure TfpgWaylandApplication.FlushPendingPresents;
+var
+  i: Integer;
+begin
+  { Present each dirty window. A manager that can't present yet (surface not
+    configured, or both its buffers still held by the compositor) returns False
+    and is kept for the next pass; otherwise it's removed. }
+  i := 0;
+  while i < FPendingPresents.Count do
+  begin
+    if TWaylandBufferManager(FPendingPresents[i]).FlushPending then
+      FPendingPresents.Delete(i)
+    else
+      Inc(i);
+  end;
 end;
 
 function TfpgWaylandApplication.MessagesPending: boolean;
@@ -1953,6 +1995,7 @@ begin
   lDisplay := Self;
   FIsInitialized:=False;
   FPopupStack := TFPList.Create;
+  FPendingPresents := TFPList.Create;
 
   { Default client-side decoration style (mac dots). Apps may change this via
     DecorationStyle or supply a custom DecorationDrawer. }
@@ -2010,6 +2053,7 @@ begin
     FDecorationDrawer.Free;
   FDisplay.Free;
   FPopupStack.Free;
+  FPendingPresents.Free;
   UnLoadFontConfigLib;
   inherited Destroy;
 end;
