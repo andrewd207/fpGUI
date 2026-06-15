@@ -19,6 +19,22 @@
     </frameworkOptions>
   </test>
 
+  <!-- The IDE doesn't conditionally compile on the backend (it goes through
+       fpg_interface), but a matching 'wayland' profile lets -p wayland apply
+       debug info to the IDE's own units and the final executable, so maximus
+       is debuggable (otherwise only the framework units carry debug info and
+       the binary ends up stripped). -->
+  <profiles>
+    <profile>
+      <id>wayland</id>
+      <compilerOptions>
+        <option>-g</option>
+        <option>-gl</option>
+        <option>-gw3</option>
+      </compilerOptions>
+    </profile>
+  </profiles>
+
   <moduleDependencies>
     <module>../framework</module>
   </moduleDependencies>
