@@ -35,10 +35,8 @@
       <name>support</name>
       <version>1.0.0</version>
     </dependency>
-  </dependencies>
-
-<!--
-  <dependencies>
+    <!-- OPDF debugger (FPC 3.3.x): provides pdr_ports etc. for
+         ide.debug.adapter. On FPC 3.2.x the IDE uses the no-op stub. -->
     <dependency>
       <name>opdf-lib</name>
       <version>0.3.1</version>
@@ -52,6 +50,5 @@
       <version>0.3.1</version>
     </dependency>
   </dependencies>
--->
 
 </project>
