@@ -210,6 +210,9 @@ type
     FKeyboardRepeatRate: Integer;
     FKeyboard: TXKBHelper;
     FKeyTimer: TObject;
+    { Window that currently holds keyboard focus — the target for synthesized
+      key-repeat events (Wayland makes the client do its own key repeat). }
+    FKeyRepeatWin: TObject;
     FShiftState: TShiftState;
     FPopupStack: TFPList;
     { Buffer managers with a deferred (coalesced) present pending. Flushed once
@@ -240,7 +243,7 @@ type
     procedure SetKeyboardRepeat(Sender: TObject; ARate, ADelay: LongInt);
     procedure SetupKeymap(Sender: TObject; AFormat: LongWord; AFileDesc: LongInt; ASize: LongInt);
     procedure UpdateKeyState(Sender: TObject; AModsDepressed, AModsLatched, AModsLocked, AGroup: LongWord);
-    procedure StartRepeatDelay(AKeyCode: Word);
+    procedure StartRepeatDelay(AKeyCode: LongWord);
   protected
     procedure   DoFlush;
     function    DoGetFontFaceList: TStringList; override;
@@ -416,6 +419,9 @@ const
   CSD_BTN_HIT         = 10;  { hit/hover radius (generous, > drawn radius) }
   { Max gap between two titlebar clicks to count as a double-click (ms). }
   CSD_DOUBLECLICK_MS  = 400;
+  { Extra ms added to the compositor's key-repeat delay before the first repeat,
+    so a quick keypress doesn't start repeating too eagerly. }
+  KEY_REPEAT_DELAY_PAD = 100;
 
 type
 
@@ -1521,9 +1527,16 @@ end;
 
 procedure TfpgWaylandApplication.KeyboardRepeatDelayExpired(Sender: TObject);
 begin
-  TfpgTimer(Sender).OnTimer:=@KeyboardRepeatKeyTimer;
-  KeyboardRepeatKeyTimer(Self);
-  TfpgTimer(Sender).Interval:=FKeyboardRepeatRate;
+  { The initial delay elapsed: switch the timer over to the repeat rate and
+    fire the first repeat now. }
+  TfpgTimer(Sender).OnTimer := @KeyboardRepeatKeyTimer;
+  KeyboardRepeatKeyTimer(Sender);
+  { repeat_info's rate is keys-per-second; the timer wants a millisecond
+    interval. (rate <= 0 means repeat is disabled, handled in StartRepeatDelay.) }
+  if FKeyboardRepeatRate > 0 then
+    TfpgTimer(Sender).Interval := 1000 div FKeyboardRepeatRate
+  else
+    TfpgTimer(Sender).Enabled := False;
 end;
 
 procedure TfpgWaylandApplication.KeyboardRepeatKeyTimer(Sender: TObject);
@@ -1532,13 +1545,20 @@ var
   lKeyChar: UTF8String;
 begin
   msgp.keyboard.shiftstate := FKeyboard.ModState;
-  msgp.keyboard.keycode:=KeySymToKeycode(TKeyboardTimer(Sender).KeyCode);
-  fpgPostMessage(nil, nil {win}, FPGM_KEYPRESS, msgp);
-  lKeyChar := FKeyboard.KeySymToUtf8(TKeyboardTimer(Sender).KeyCode);
-  if lKeyChar <> '' then
+  msgp.keyboard.keycode := KeySymToKeycode(TKeyboardTimer(Sender).KeyCode);
+  { Route to the focused window, same as a real press (posting to nil dropped
+    the event). }
+  fpgPostMessage(nil, FKeyRepeatWin, FPGM_KEYPRESS, msgp);
+  { Same as a real press: no typed character while Ctrl/Alt are held. }
+  if not ((ssCtrl in msgp.keyboard.shiftstate)
+       or (ssAlt in msgp.keyboard.shiftstate)) then
   begin
-    msgp.keyboard.keychar:= lKeyChar[1];
-    fpgPostMessage(nil, nil{win}, FPGM_KEYCHAR, msgp);
+    lKeyChar := FKeyboard.KeySymToUtf8(TKeyboardTimer(Sender).KeyCode);
+    if lKeyChar <> '' then
+    begin
+      msgp.keyboard.keychar := lKeyChar;
+      fpgPostMessage(nil, FKeyRepeatWin, FPGM_KEYCHAR, msgp);
+    end;
   end;
 
 
@@ -1549,7 +1569,8 @@ procedure TfpgWaylandApplication.SendKeyboardEnterMessage(Sender: TObject;
 begin
   if not Assigned(FKeyTimer) then
   begin
-    FKeyTimer := TfpgTimer.Create(1000);
+    { Must be a TKeyboardTimer — StartRepeatDelay stores the key code on it. }
+    FKeyTimer := TKeyboardTimer.Create(1000);
     TfpgTimer(FKeyTimer).Enabled:=False;
   end;
   if FSuppressActivate then
@@ -1611,12 +1632,20 @@ begin
   fpgPostMessage(nil, Sender, msg, msgp);
   if msg = FPGM_KEYPRESS then
   begin
+    FKeyRepeatWin := Sender;  { route repeats to the focused window }
     StartRepeatDelay(lKeySym);
-    lChars := FKeyboard.KeySymToUtf8(lKeySym);
-    for i := 1 to UTF8Length(lChars) do
+    { Don't emit a typed character for Ctrl/Alt combos — those are shortcuts
+      (e.g. Ctrl+F), not text input. Shift/AltGr already produce the right
+      character via the keysym, so they're allowed through. (Matches X11.) }
+    if not ((ssCtrl in msgp.keyboard.shiftstate)
+         or (ssAlt in msgp.keyboard.shiftstate)) then
     begin
-      msgp.keyboard.keychar := UTF8Copy(lChars, i, 1);
-      fpgPostMessage(nil, Sender, FPGM_KEYCHAR, msgp);
+      lChars := FKeyboard.KeySymToUtf8(lKeySym);
+      for i := 1 to UTF8Length(lChars) do
+      begin
+        msgp.keyboard.keychar := UTF8Copy(lChars, i, 1);
+        fpgPostMessage(nil, Sender, FPGM_KEYCHAR, msgp);
+      end;
     end;
   end;
 end;
@@ -1810,16 +1839,20 @@ begin
   end;
 end;
 
-procedure TfpgWaylandApplication.StartRepeatDelay(AKeyCode: Word);
+procedure TfpgWaylandApplication.StartRepeatDelay(AKeyCode: LongWord);
 var
   lTimer: TKeyboardTimer;
 begin
+  { rate <= 0 means the compositor disabled key repeat. }
+  if (FKeyboardRepeatRate <= 0) or (FKeyboardRepeatDelay <= 0)
+  or not Assigned(FKeyTimer) then
+    Exit;
   lTimer:= TKeyboardTimer(FKeyTimer);
   lTimer.KeyCode := AKeyCode;
   lTimer.Enabled := False;
-  lTimer.Interval:=FKeyboardRepeatDelay ;
-  lTimer.Enabled := True;
+  lTimer.Interval:=FKeyboardRepeatDelay + KEY_REPEAT_DELAY_PAD;  { initial delay (ms) }
   lTimer.OnTimer:=@KeyboardRepeatDelayExpired;
+  lTimer.Enabled := True;
 
 end;
 
