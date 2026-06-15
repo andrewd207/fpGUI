@@ -49,6 +49,11 @@
       <defines>
         <define>WAYLAND</define>
       </defines>
+      <compilerOptions>
+        <option>-g</option>
+        <option>-gl</option>
+        <option>-gw3</option>
+      </compilerOptions>
     </profile>
   </profiles>
 
