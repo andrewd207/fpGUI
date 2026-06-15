@@ -21,6 +21,7 @@ interface
 
 uses
   Classes, SysUtils, fpg_base, fpg_wayland_classes,
+  agg_2D,
   libfontconfig,
   dynlibs,
   freetypeh,
@@ -30,6 +31,13 @@ uses
   xkb_classes;
 
 type
+  { Which titlebar window button the pointer is over (or acting on). }
+  TfpgwTitleButton = (tbNone, tbClose, tbMaximize, tbMinimize);
+
+  { Built-in client-side decoration button styles. }
+  TfpgWaylandDecorationStyle = (wdsMac, wdsClassic);
+
+  TfpgWaylandWindow = class;  { forward }
 
   { TfpgWaylandImage }
 
@@ -62,6 +70,9 @@ type
       (FInsetLeft, FInsetTop); the surface is content + insets. }
     FInsetLeft, FInsetTop, FInsetRight, FInsetBottom: Integer;
     FInDecorArea: Boolean;  { pointer currently over the decoration frame }
+    FHoverButton: TfpgwTitleButton;  { titlebar button under the pointer }
+    FLastTitleClickTime: LongWord;   { for titlebar double-click detection }
+    FSizeable: Boolean;     { waSizeable: allow interactive resize (else fixed) }
     procedure DecoratorConfigure(Sender: TObject; AEdges: LongWord; AWidth,
       AHeight: LongInt);
     procedure DecoratorPaint(Sender: TObject);
@@ -91,12 +102,19 @@ type
     procedure   AdjustMousePos(var AX, AY: Integer);
     procedure   AdjustPaintPos(var AX, AY: Integer);
     procedure   DecoratorDraw(ABuffer: TfpgwBuffer);
-    procedure   HandleDecorationButton(AMsg: DWord; AParams: TfpgMessageParams);
+    procedure   HandleDecorationButton(AMsg: DWord; ATime: LongWord; AParams: TfpgMessageParams);
     procedure   HandleDecorationMove;
+    { Which titlebar window button (close/max/min) the pointer is over, given
+      surface-relative coords; tbNone if not over a button. }
+    function    TitlebarButtonHit(ASurfX, ASurfY: Integer): TfpgwTitleButton;
     { Classify the pointer (FMousePos, content-relative) against the decoration
       frame: returns a WL_SHELL_SURFACE_RESIZE_* edge/corner code, or
       WL_SHELL_SURFACE_RESIZE_NONE for the titlebar move zone. }
     function    DecorationHitTest: DWord;
+    { Translate the window's WindowAttributes (waSizeable) + the primary widget's
+      Min/Max size into compositor resize constraints (xdg set_min/max_size) and
+      update FSizeable (which also gates our own client-side resize edges). }
+    procedure   ApplyResizeConstraints;
   public
     { Draw the client-side decoration frame (titlebar, borders, buttons) into
       the raw ARGB8888 surface buffer. Called by the buffer manager before
@@ -116,6 +134,68 @@ type
     property    InsetTop: Integer read FInsetTop;
     property    InsetRight: Integer read FInsetRight;
     property    InsetBottom: Integer read FInsetBottom;
+    { Decoration state exposed for custom drawers. }
+    property    Title: String read FWindowTitle;
+    property    HoverButton: TfpgwTitleButton read FHoverButton;
+  end;
+
+
+  { TfpgWaylandDecorationDrawer
+    Pluggable client-side window-decoration renderer. Assign an instance to
+    TfpgWaylandApplication.DecorationDrawer to fully customize the frame, or use
+    TfpgWaylandApplication.DecorationStyle to pick a built-in.
+
+    The base class owns the frame geometry (insets), the titlebar/border fill
+    and the button hit-test; subclasses need only override DrawButtons to render
+    the three window buttons. A drawer wanting total control may override
+    DrawFrame instead. }
+  TfpgWaylandDecorationDrawer = class
+  protected
+    FTitlebarHeight: Integer;
+    FBorderWidth: Integer;
+    FCornerRadius: Integer;
+    FButtonGap: Integer;
+    FButtonHitRadius: Integer;
+    FTitlebarColor: TfpgColor;
+    FTitleTextColor: TfpgColor;
+    { Paint the three window buttons. agg is already attached to the surface
+      buffer. ACloseCX/ACY is the centre of the (rightmost) close button; the
+      maximize and minimize buttons step left by ButtonGap. AHover identifies
+      the button currently under the pointer (tbNone if none). }
+    procedure DrawButtons(var agg: agg_2D.Agg2D; ACloseCX, ACY: Integer;
+      AHover: TfpgwTitleButton); virtual; abstract;
+  public
+    constructor Create; virtual;
+    { Frame insets (left, top, right, bottom) this drawer needs around content. }
+    procedure GetInsets(out L, T, R, B: Integer); virtual;
+    { Which titlebar button is at surface coords (ASurfX,ASurfY); tbNone if none. }
+    function  ButtonHit(AWin: TfpgWaylandWindow; ASurfX, ASurfY: Integer): TfpgwTitleButton; virtual;
+    { Render the whole frame (titlebar, borders, buttons, title) into the
+      ARGB8888 surface buffer. }
+    procedure DrawFrame(AWin: TfpgWaylandWindow; ABuffer: Pointer; ABufW, ABufH: Integer); virtual;
+    property TitlebarHeight: Integer read FTitlebarHeight write FTitlebarHeight;
+    property BorderWidth: Integer read FBorderWidth write FBorderWidth;
+    property CornerRadius: Integer read FCornerRadius write FCornerRadius;
+    property ButtonGap: Integer read FButtonGap write FButtonGap;
+    property ButtonHitRadius: Integer read FButtonHitRadius write FButtonHitRadius;
+    property TitlebarColor: TfpgColor read FTitlebarColor write FTitlebarColor;
+    property TitleTextColor: TfpgColor read FTitleTextColor write FTitleTextColor;
+  end;
+
+
+  { Mac-style coloured dots (default style). }
+  TfpgWaylandMacDecorationDrawer = class(TfpgWaylandDecorationDrawer)
+  protected
+    procedure DrawButtons(var agg: agg_2D.Agg2D; ACloseCX, ACY: Integer;
+      AHover: TfpgwTitleButton); override;
+  end;
+
+
+  { Traditional minimize / maximize / close glyphs ( _  []  X ). }
+  TfpgWaylandClassicDecorationDrawer = class(TfpgWaylandDecorationDrawer)
+  protected
+    procedure DrawButtons(var agg: agg_2D.Agg2D; ACloseCX, ACY: Integer;
+      AHover: TfpgwTitleButton); override;
   end;
 
 
@@ -137,6 +217,12 @@ type
       the focused widget keeps its focus during a titlebar drag. }
     FSuppressDeactivate: Boolean;
     FSuppressActivate: Boolean;
+    { Client-side decoration drawer (never nil once constructed). }
+    FDecorationDrawer: TfpgWaylandDecorationDrawer;
+    FDecorationStyle: TfpgWaylandDecorationStyle;
+    FOwnsDecorationDrawer: Boolean;
+    procedure SetDecorationDrawer(AValue: TfpgWaylandDecorationDrawer);
+    procedure SetDecorationStyle(AValue: TfpgWaylandDecorationStyle);
     procedure KeyboardRepeatDelayExpired(Sender: TObject);
     procedure KeyboardRepeatKeyTimer(Sender: TObject);
     procedure SendKeyboardEnterMessage(Sender: TObject; AKeys: Pwl_array);
@@ -177,6 +263,16 @@ type
 
     property Display: TfpgwDisplay read FDisplay;
 
+    { Pick a built-in client-side decoration button style. Setting this replaces
+      the active drawer with a fresh built-in instance (any previously assigned
+      custom drawer is released only if this application created it). }
+    property DecorationStyle: TfpgWaylandDecorationStyle
+      read FDecorationStyle write SetDecorationStyle;
+    { Assign a fully custom decoration drawer. The application does NOT free a
+      drawer assigned here; the caller retains ownership. Assigning nil restores
+      the current built-in DecorationStyle. }
+    property DecorationDrawer: TfpgWaylandDecorationDrawer
+      read FDecorationDrawer write SetDecorationDrawer;
 
   end;
 
@@ -229,7 +325,7 @@ implementation
 uses
   fpg_cmdlineparams, fpg_main, ctypes, fpg_widget, libharfbuzz,
   wayland_protocol, fpg_stringutils, fpg_popupwindow,
-  fpg_wayland_decorations, agg_2D, agg_basics, process;
+  fpg_wayland_decorations, agg_basics, process;
 
 { Run a command and return its trimmed stdout (with surrounding single quotes
   stripped, as emitted by gsettings). Empty string on any failure. }
@@ -304,6 +400,12 @@ const
     triggered. The band stays thin, but the corner is grabbable over a longer
     stretch so it isn't a tiny 5x5 target. }
   CSD_CORNER_REACH    = 15;
+  { Titlebar window-button geometry (mac-style dots, right-aligned). }
+  CSD_BTN_R           = 6;   { drawn dot radius }
+  CSD_BTN_GAP         = 20;  { centre-to-centre spacing }
+  CSD_BTN_HIT         = 10;  { hit/hover radius (generous, > drawn radius) }
+  { Max gap between two titlebar clicks to count as a double-click (ms). }
+  CSD_DOUBLECLICK_MS  = 400;
 
 type
 
@@ -641,7 +743,7 @@ procedure TfpgWaylandWindow.DecoratorConfigure(Sender: TObject;
   AEdges: LongWord; AWidth, AHeight: LongInt);
 begin
   //
-  WriteLn('Decorator Configure');
+  //WriteLn('Decorator Configure');
 end;
 
 procedure TfpgWaylandWindow.DoAllocateWindowHandle(AParent: TfpgWidgetBase);
@@ -653,6 +755,8 @@ var
   lHeight: Integer;
   msgp: TfpgMessageParams;
   lActiveWindow: TfpgwWindow;
+  lPopupGrab: Boolean = False;
+  lGrabSerial: DWord = 0;
 begin
   if FWinHandle = nil then
   begin
@@ -668,6 +772,24 @@ begin
         raise Exception.Create('Unable to find a window to associate with popup window');
 
       lPopupFor := lActiveWindow;
+      { Menus / combo dropdowns (TfpgPopupWindow) take an explicit xdg_popup
+        grab: the compositor routes input to the popup and dismisses it on a
+        click outside (-> popup_done -> OnClose). The grab needs the opening
+        button's serial; menus open on the release, combos on the press, so we
+        use the captured button-PRESS serial (ButtonPressSerial) which is valid
+        in both cases. (Confirmed working via the wayland_grabtest probe once the
+        FActiveMouseWin nil-deref race and dirty-teardown crashes were fixed —
+        the earlier "grab never maps" was actually that nil-deref crashing the
+        app on the first click.) Tooltips (TfpgHintWindow) must NOT grab. }
+      lPopupGrab := Owner is TfpgPopupWindow;
+      lGrabSerial := lDisplay.Display.ButtonPressSerial;
+      { A grabbed popup steals keyboard focus from the parent toplevel, so the
+        compositor sends it a keyboard-leave -> FPGM_DEACTIVATE -> TfpgForm
+        closes all popups (it would tear the menu down the instant it opens).
+        Suppress that deactivate (same mechanism as decoration drags) so the
+        menu survives; the matching activate on close is suppressed too. }
+      if lPopupGrab then
+        WApplication.BeginDecorationGrab;
     end;
 
     lHeight := Height;
@@ -680,7 +802,7 @@ begin
       //fpgSendMessage(nil, Owner, FPGM_RESIZE, msgp);
     end;
 
-    FWinHandle := TfpgwWindow.Create(Self, lDisplay.Display, lParentWin, Left, Top, lWidth, lHeight, lPopupFor);
+    FWinHandle := TfpgwWindow.Create(Self, lDisplay.Display, lParentWin, Left, Top, lWidth, lHeight, lPopupFor, lPopupGrab, lGrabSerial);
     {if Assigned(FDecoratorHandle) then
     begin
       FDecoratorHandle.Host:= FWinHandle;
@@ -694,11 +816,14 @@ begin
       { Always draw our own frame for a consistent look across compositors.
         Ask the compositor (if it supports the protocol) not to add its own. }
       FWinHandle.SurfaceShell.SetClientSideDecorations;
-      FInsetLeft   := CSD_FRAME_BORDER;
-      FInsetTop    := CSD_TITLEBAR_HEIGHT;
-      FInsetRight  := CSD_FRAME_BORDER;
-      FInsetBottom := CSD_FRAME_BORDER;
+      WApplication.DecorationDrawer.GetInsets(FInsetLeft, FInsetTop, FInsetRight, FInsetBottom);
       FDecor := TfpgWaylandDecorator.Create(Self, FWinHandle);
+      { Expose the content origin so child popups (menus) anchor to the content,
+        not over our client-side frame. }
+      FWinHandle.ContentOffsetX := FInsetLeft;
+      FWinHandle.ContentOffsetY := FInsetTop;
+      { Apply the initial resize constraints (fixed vs sizeable, Min/Max). }
+      ApplyResizeConstraints;
     end;
 
     if WindowType = wtPopup then
@@ -737,7 +862,10 @@ end;
 procedure TfpgWaylandWindow.DoSetWindowAttributes(const AOldAtributes,
   ANewAttributes: TWindowAttributes; const AForceAll: Boolean);
 begin
-
+  { waSizeable (and the widget's Min/Max) controls how/whether the window
+    resizes. Other attributes (waFullScreen, waStayOnTop, ...) are not yet
+    mapped on Wayland. }
+  ApplyResizeConstraints;
 end;
 
 procedure TfpgWaylandWindow.DoSetWindowVisible(const AValue: Boolean);
@@ -795,7 +923,7 @@ end;
 function TfpgWaylandWindow.DoWindowToScreen(ASource: TfpgWindowBase;
   const AScreenPos: TPoint): TPoint;
 begin
-  WriteLn(Format('Window to  screen Screenpos = %d:%d',[AScreenPos.x, AScreenPos.y]));
+  //WriteLn(Format('Window to  screen Screenpos = %d:%d',[AScreenPos.x, AScreenPos.y]));
   Result := AScreenPos;
 end;
 
@@ -803,13 +931,13 @@ procedure TfpgWaylandWindow.DoUpdateWindowPosition;
 var
   lXDGSurface: TfpgwXDGShellSurface;
 begin
-  Writeln('window wants to update position');
+  //Writeln('window wants to update position');
   if not Assigned(FWinHandle) then
     Exit;
 
   if FWinHandle.SurfaceShell is TfpgwXDGShellSurface then
   begin
-    WriteLn(Format('DoUpdateWindowPosition = x%d:y%d[w%d:h%d]',[Left, Top, FWinHandle.GetWidth, FWinHandle.GetHeight]));
+    //WriteLn(Format('DoUpdateWindowPosition = x%d:y%d[w%d:h%d]',[Left, Top, FWinHandle.GetWidth, FWinHandle.GetHeight]));
     lXDGSurface := TfpgwXDGShellSurface(FWinHandle.SurfaceShell);
     //lXDGSurface.Surface.SetWindowGeometry(0,0, FWinHandle.GetWidth, FWinHandle.GetHeight);
   end;
@@ -888,37 +1016,96 @@ begin
 end;
 
 procedure TfpgWaylandWindow.PaintFrame(ABuffer: Pointer; ABufW, ABufH: Integer);
-const
-  RADIUS  = 6;      { subtle rounded top corners }
-  BTN_R   = 6;      { titlebar button radius }
-  BTN_GAP = 20;     { spacing between buttons }
-var
-  agg: agg_2D.Agg2D;
-  dispW, dispH: Integer;
-  stride, row: Integer;
-  font: TfpgFontResourceBase;
-  cy, cx: Integer;
-
-  procedure Circle(ACx, ACy: Integer; r, g, b: byte);
-  begin
-    agg.fillColor(r, g, b, 255);
-    agg.resetPath;
-    agg.addEllipse(ACx, ACy, BTN_R, BTN_R, agg_2D.CW);
-    agg.drawPath(agg_2D.FillOnly);
-  end;
-
 begin
   if (FInsetTop = 0) and (FInsetLeft = 0) then
     Exit;  { undecorated / server-side — nothing to draw }
+  WApplication.DecorationDrawer.DrawFrame(Self, ABuffer, ABufW, ABufH);
+end;
 
-  dispW := Width + FInsetLeft + FInsetRight;
-  dispH := Height + FInsetTop + FInsetBottom;
+function TfpgWaylandWindow.TitlebarButtonHit(ASurfX, ASurfY: Integer): TfpgwTitleButton;
+begin
+  if FInsetTop = 0 then
+    Result := tbNone   { undecorated }
+  else
+    Result := WApplication.DecorationDrawer.ButtonHit(Self, ASurfX, ASurfY);
+end;
+
+{ TfpgWaylandDecorationDrawer }
+
+constructor TfpgWaylandDecorationDrawer.Create;
+begin
+  inherited Create;
+  FTitlebarHeight  := CSD_TITLEBAR_HEIGHT;
+  FBorderWidth     := CSD_FRAME_BORDER;
+  FCornerRadius    := 6;
+  FButtonGap       := CSD_BTN_GAP;
+  FButtonHitRadius := CSD_BTN_HIT;
+  FTitlebarColor   := TfpgColor($003A3A40);  { dark slate }
+  FTitleTextColor  := TfpgColor($00E8E8E8);  { near-white }
+end;
+
+procedure TfpgWaylandDecorationDrawer.GetInsets(out L, T, R, B: Integer);
+begin
+  L := FBorderWidth;
+  T := FTitlebarHeight;
+  R := FBorderWidth;
+  B := FBorderWidth;
+end;
+
+function TfpgWaylandDecorationDrawer.ButtonHit(AWin: TfpgWaylandWindow;
+  ASurfX, ASurfY: Integer): TfpgwTitleButton;
+var
+  dispW, cy, cx: Integer;
+
+  function Near(ACx: Integer): Boolean;
+  begin
+    Result := (Abs(ASurfX - ACx) <= FButtonHitRadius)
+          and (Abs(ASurfY - cy) <= FButtonHitRadius);
+  end;
+
+begin
+  Result := tbNone;
+  dispW := AWin.Width + AWin.InsetLeft + AWin.InsetRight;
+  cy := AWin.InsetTop div 2;
+  cx := dispW - AWin.InsetRight - FButtonGap;  { close (rightmost) }
+  if Near(cx) then
+    Result := tbClose
+  else if Near(cx - FButtonGap) then
+    Result := tbMaximize
+  else if Near(cx - 2 * FButtonGap) then
+    Result := tbMinimize;
+end;
+
+procedure TfpgWaylandDecorationDrawer.DrawFrame(AWin: TfpgWaylandWindow;
+  ABuffer: Pointer; ABufW, ABufH: Integer);
+var
+  agg: agg_2D.Agg2D;
+  dispW, dispH, iL, iT, iR, iB: Integer;
+  stride, row, cx, cy: Integer;
+  font: TfpgFontResourceBase;
+
+  procedure RGB(AColor: TfpgColor; out r, g, b: byte);
+  begin
+    r := (AColor shr 16) and $FF;
+    g := (AColor shr 8) and $FF;
+    b := AColor and $FF;
+  end;
+
+var
+  tr, tg, tb: byte;
+begin
+  iL := AWin.InsetLeft;  iT := AWin.InsetTop;
+  iR := AWin.InsetRight; iB := AWin.InsetBottom;
+  dispW := AWin.Width + iL + iR;
+  dispH := AWin.Height + iT + iB;
   stride := ABufW * 4;
 
   { Clear the titlebar strip to transparent so the rounded top corners show
     the desktop through them (AggPas blends, so it can't clear to transparent). }
-  for row := 0 to FInsetTop - 1 do
+  for row := 0 to iT - 1 do
     FillDWord((PByte(ABuffer) + row * stride)^, dispW, 0);
+
+  RGB(FTitlebarColor, tr, tg, tb);
 
   agg.Construct;
   try
@@ -927,53 +1114,176 @@ begin
 
     { Titlebar: rounded top, square bottom (overdraw the rounded rect's lower
       corners with a plain rectangle within the titlebar band). }
-    agg.fillColor(58, 58, 64, 255);
-    agg.roundedRect(0, 0, dispW, 2 * RADIUS, RADIUS);
-    agg.rectangle(0, RADIUS, dispW, FInsetTop);
+    agg.fillColor(tr, tg, tb, 255);
+    if FCornerRadius > 0 then
+    begin
+      agg.roundedRect(0, 0, dispW, 2 * FCornerRadius, FCornerRadius);
+      agg.rectangle(0, FCornerRadius, dispW, iT);
+    end
+    else
+      agg.rectangle(0, 0, dispW, iT);
 
     { Side and bottom borders }
-    agg.fillColor(58, 58, 64, 255);
-    if FInsetLeft > 0 then
-      agg.rectangle(0, FInsetTop, FInsetLeft, dispH);
-    if FInsetRight > 0 then
-      agg.rectangle(dispW - FInsetRight, FInsetTop, dispW, dispH);
-    if FInsetBottom > 0 then
-      agg.rectangle(0, dispH - FInsetBottom, dispW, dispH);
+    if iL > 0 then
+      agg.rectangle(0, iT, iL, dispH);
+    if iR > 0 then
+      agg.rectangle(dispW - iR, iT, dispW, dispH);
+    if iB > 0 then
+      agg.rectangle(0, dispH - iB, dispW, dispH);
 
-    { Window buttons (mac-style), right-aligned in the titlebar. }
-    cy := FInsetTop div 2;
-    cx := dispW - FInsetRight - BTN_GAP;
-    Circle(cx, cy, 235, 90, 80);    { close  - red }
-    Circle(cx - BTN_GAP, cy, 240, 190, 70);  { maximize - amber }
-    Circle(cx - 2 * BTN_GAP, cy, 95, 200, 100); { minimize - green }
+    { Window buttons (style-specific), right-aligned in the titlebar. }
+    cy := iT div 2;
+    cx := dispW - iR - FButtonGap;
+    DrawButtons(agg, cx, cy, AWin.HoverButton);
   finally
     agg.Destruct;
   end;
 
   { Title text, vertically centred in the titlebar. }
   font := fpgApplication.FontManager.GetDefaultFont;
-  if Assigned(font) and (FWindowTitle <> '') then
+  if Assigned(font) and (AWin.Title <> '') then
     font.DrawTextToBuffer(PByte(ABuffer), stride, ABufW, ABufH,
-      8, (FInsetTop - font.GetHeight) div 2 + font.GetAscent,
-      FWindowTitle, TfpgColor($00E8E8E8),
-      0, 0, dispW - 3 * BTN_GAP, FInsetTop);
+      iL + 4, (iT - font.GetHeight) div 2 + font.GetAscent,
+      AWin.Title, FTitleTextColor,
+      0, 0, dispW - 3 * FButtonGap, iT);
+end;
+
+{ TfpgWaylandMacDecorationDrawer }
+
+procedure TfpgWaylandMacDecorationDrawer.DrawButtons(var agg: agg_2D.Agg2D;
+  ACloseCX, ACY: Integer; AHover: TfpgwTitleButton);
+
+  procedure Dot(ACx: Integer; r, g, b: byte; AHover: Boolean);
+  begin
+    { Hover feedback: a soft lighter halo behind the dot, plus a brighter dot. }
+    if AHover then
+    begin
+      agg.fillColor(255, 255, 255, 60);
+      agg.resetPath;
+      agg.addEllipse(ACx, ACY, FButtonHitRadius, FButtonHitRadius, agg_2D.CW);
+      agg.drawPath(agg_2D.FillOnly);
+      agg.fillColor(r, g, b, 255);
+    end
+    else
+      { Slightly dim the dots when not hovered so the hover 'lights up'. }
+      agg.fillColor(r - r div 4, g - g div 4, b - b div 4, 255);
+    agg.resetPath;
+    agg.addEllipse(ACx, ACY, CSD_BTN_R, CSD_BTN_R, agg_2D.CW);
+    agg.drawPath(agg_2D.FillOnly);
+  end;
+
+begin
+  Dot(ACloseCX, 235, 90, 80, AHover = tbClose);                 { close - red }
+  Dot(ACloseCX - FButtonGap, 240, 190, 70, AHover = tbMaximize);  { maximize - amber }
+  Dot(ACloseCX - 2 * FButtonGap, 95, 200, 100, AHover = tbMinimize); { minimize - green }
+end;
+
+{ TfpgWaylandClassicDecorationDrawer }
+
+procedure TfpgWaylandClassicDecorationDrawer.DrawButtons(var agg: agg_2D.Agg2D;
+  ACloseCX, ACY: Integer; AHover: TfpgwTitleButton);
+const
+  S = 5;  { glyph half-size }
+var
+  glyphR, glyphG, glyphB: byte;
+
+  { Subtle rounded hover background behind a button. }
+  procedure HoverBg(ACx: Integer; r, g, b, a: byte);
+  begin
+    agg.noLine;
+    agg.fillColor(r, g, b, a);
+    agg.roundedRect(ACx - FButtonGap div 2, ACY - FButtonGap div 2,
+                    ACx + FButtonGap div 2, ACY + FButtonGap div 2, 4);
+  end;
+
+  procedure StrokePrep;
+  begin
+    agg.noFill;
+    agg.lineColor(glyphR, glyphG, glyphB, 255);
+    agg.lineWidth(1.4);
+  end;
+
+begin
+  { Minimize: a single horizontal line near centre. }
+  glyphR := $E8; glyphG := $E8; glyphB := $E8;
+  if AHover = tbMinimize then
+    HoverBg(ACloseCX - 2 * FButtonGap, 255, 255, 255, 45);
+  StrokePrep;
+  agg.line(ACloseCX - 2 * FButtonGap - S, ACY + 1,
+           ACloseCX - 2 * FButtonGap + S, ACY + 1);
+
+  { Maximize: a square outline. }
+  if AHover = tbMaximize then
+    HoverBg(ACloseCX - FButtonGap, 255, 255, 255, 45);
+  StrokePrep;
+  agg.rectangle(ACloseCX - FButtonGap - S, ACY - S,
+                ACloseCX - FButtonGap + S, ACY + S);
+
+  { Close: an X. Red background + white glyph on hover (Windows-like). }
+  if AHover = tbClose then
+  begin
+    HoverBg(ACloseCX, 232, 17, 35, 230);  { #E81123 }
+    glyphR := 255; glyphG := 255; glyphB := 255;
+  end;
+  StrokePrep;
+  agg.line(ACloseCX - S, ACY - S, ACloseCX + S, ACY + S);
+  agg.line(ACloseCX - S, ACY + S, ACloseCX + S, ACY - S);
 end;
 
 procedure TfpgWaylandWindow.HandleDecorationButton(AMsg: DWord;
-  AParams: TfpgMessageParams);
+  ATime: LongWord; AParams: TfpgMessageParams);
 var
   lEdge: DWord;
+  lBtn: TfpgwTitleButton;
+  sx, sy: Integer;
 begin
-  if AMsg = FPGM_MOUSEDOWN then
-  begin
-    lEdge := DecorationHitTest;
-    { We are about to start an interactive grab — keep window focus appearance. }
-    WApplication.BeginDecorationGrab;
-    if lEdge = WL_SHELL_SURFACE_RESIZE_NONE then
-      FWinHandle.SurfaceShell.Move(FWinHandle.Display.EventSerial)
-    else
-      FWinHandle.SurfaceShell.Resize(FWinHandle.Display.EventSerial, lEdge);
+  if AMsg <> FPGM_MOUSEDOWN then
+    Exit;
+
+  sx := FMousePos.X + FInsetLeft;
+  sy := FMousePos.Y + FInsetTop;
+
+  { 1) Titlebar window buttons take priority over move/resize. }
+  lBtn := TitlebarButtonHit(sx, sy);
+  case lBtn of
+    tbClose:
+      begin
+        SendCloseWindowMessage(Self);
+        Exit;
+      end;
+    tbMaximize:
+      begin
+        FWinHandle.SurfaceShell.SetMaximized(not FWinHandle.SurfaceShell.IsMaximized);
+        Exit;
+      end;
+    tbMinimize:
+      begin
+        FWinHandle.SurfaceShell.SetMinimized;
+        Exit;
+      end;
   end;
+
+  lEdge := DecorationHitTest;
+
+  { 2) Double-click in the titlebar move zone toggles maximize. }
+  if lEdge = WL_SHELL_SURFACE_RESIZE_NONE then
+  begin
+    if (ATime - FLastTitleClickTime) <= CSD_DOUBLECLICK_MS then
+    begin
+      FLastTitleClickTime := 0;
+      FWinHandle.SurfaceShell.SetMaximized(not FWinHandle.SurfaceShell.IsMaximized);
+      Exit;
+    end;
+    FLastTitleClickTime := ATime;
+  end;
+
+  { 3) Otherwise start an interactive move/resize grab. Keep window focus
+       appearance across the compositor's keyboard leave/enter. }
+  WApplication.BeginDecorationGrab;
+  if lEdge = WL_SHELL_SURFACE_RESIZE_NONE then
+    FWinHandle.SurfaceShell.Move(FWinHandle.Display.EventSerial)
+  else
+    FWinHandle.SurfaceShell.Resize(FWinHandle.Display.EventSerial, lEdge);
 end;
 
 function TfpgWaylandWindow.DecorationHitTest: DWord;
@@ -981,6 +1291,14 @@ var
   sx, sy, dispW, dispH: Integer;
   leftB, rightB, topB, bottomB: Boolean;
 begin
+  { A non-sizeable (fixed) window has no resize edges — the whole frame is a
+    move handle so the user can still reposition it. }
+  if not FSizeable then
+  begin
+    Result := WL_SHELL_SURFACE_RESIZE_NONE;
+    Exit;
+  end;
+
   { Work in surface coordinates (content + frame). FMousePos is content-local. }
   sx := FMousePos.X + FInsetLeft;
   sy := FMousePos.Y + FInsetTop;
@@ -1018,8 +1336,26 @@ end;
 procedure TfpgWaylandWindow.HandleDecorationMove;
 var
   lDisplay: TfpgwDisplay;
+  lHover: TfpgwTitleButton;
 begin
   lDisplay := FWinHandle.Display;
+
+  { Titlebar button hover feedback. Repaint the frame when the hovered button
+    changes so the dot lights up / dims. }
+  lHover := TitlebarButtonHit(FMousePos.X + FInsetLeft, FMousePos.Y + FInsetTop);
+  if lHover <> FHoverButton then
+  begin
+    FHoverButton := lHover;
+    if Assigned(Owner) then
+      TfpgWidget(Owner).InvalidateRect(fpgRect(0, 0, Width, Height));
+  end;
+  if lHover <> tbNone then
+  begin
+    { Over a button: plain pointer, not a resize cursor. }
+    lDisplay.SetCursor(['left_ptr', 'arrow']);
+    Exit;
+  end;
+
   case DecorationHitTest of
     WL_SHELL_SURFACE_RESIZE_TOP_LEFT:
       lDisplay.SetCursor(['top_left_corner', 'nw-resize', 'top_left_arrow']);
@@ -1042,11 +1378,54 @@ begin
   end;
 end;
 
+procedure TfpgWaylandWindow.ApplyResizeConstraints;
+var
+  w: TfpgWidgetBase;
+  iW, iH: Integer;  { total horizontal / vertical decoration insets }
+  minW, minH, maxW, maxH: Integer;
+begin
+  if not Assigned(FWinHandle) then
+    Exit;
+  { Popups / undecorated surfaces are not interactively resizable toplevels. }
+  if WindowType = wtPopup then
+    Exit;
+
+  FSizeable := waSizeable in WindowAttributes;
+  iW := FInsetLeft + FInsetRight;
+  iH := FInsetTop + FInsetBottom;
+
+  if FSizeable then
+  begin
+    { Honor the primary widget's explicit Min/Max (0 = unconstrained on that
+      axis). Constraints apply to the whole surface, so add the frame insets. }
+    minW := 0; minH := 0; maxW := 0; maxH := 0;
+    w := PrimaryWidget;
+    if Assigned(w) then
+    begin
+      if w.MinWidth  > 0 then minW := w.MinWidth  + iW;
+      if w.MinHeight > 0 then minH := w.MinHeight + iH;
+      if w.MaxWidth  > 0 then maxW := w.MaxWidth  + iW;
+      if w.MaxHeight > 0 then maxH := w.MaxHeight + iH;
+    end;
+    FWinHandle.SurfaceShell.SetMinSize(minW, minH);
+    FWinHandle.SurfaceShell.SetMaxSize(maxW, maxH);
+  end
+  else
+  begin
+    { Fixed window: lock min = max = the current decorated size. }
+    FWinHandle.SurfaceShell.SetMinSize(Width + iW, Height + iH);
+    FWinHandle.SurfaceShell.SetMaxSize(Width + iW, Height + iH);
+  end;
+
+  { Constraints are double-buffered surface state; commit so they take effect. }
+  FWinHandle.SurfaceShell.Surface.Commit;
+  FWinHandle.Display.Display.Flush;
+end;
+
 constructor TfpgWaylandWindow.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
-
-
+  FSizeable := True;
 end;
 
 destructor TfpgWaylandWindow.Destroy;
@@ -1259,7 +1638,11 @@ var
   lEnum: TShiftStateEnum;
   msgp: TfpgMessageParams;
 begin
-  if not WindowInPopupStack(lWin) then
+  { Dismiss open popups only on a button PRESS outside the popup stack — never
+    on a release. A dropdown/menu opened on mouse-down would otherwise be closed
+    by the matching mouse-up landing on the parent window. (We have no popup
+    grab on this compositor, so fpGUI's popup stack is the dismissal mechanism.) }
+  if (AState = WL_POINTER_BUTTON_STATE_PRESSED) and not WindowInPopupStack(lWin) then
     ClosePopups;
   // update mouse state
   case AButton of
@@ -1307,7 +1690,7 @@ begin
   or (lWin.FMousePos.X>lWin.Width)
   or (lWin.FMousePos.Y>lWin.Height)
   then
-    lWin.HandleDecorationButton(lMsg, msgp)
+    lWin.HandleDecorationButton(lMsg, ATime, msgp)
   else
     fpgPostMessage(nil, lWin, lMsg, msgp);
 end;
@@ -1327,6 +1710,14 @@ procedure TfpgWaylandApplication.SendMouseLeaveMessage(Sender: TObject);
 var
   lWin: TfpgWaylandWindow absolute Sender;
 begin
+  lWin.FInDecorArea := False;
+  { Clear titlebar button hover so the dot dims when the pointer leaves. }
+  if lWin.FHoverButton <> tbNone then
+  begin
+    lWin.FHoverButton := tbNone;
+    if Assigned(lWin.Owner) then
+      TfpgWidget(lWin.Owner).InvalidateRect(fpgRect(0, 0, lWin.Width, lWin.Height));
+  end;
   fpgPostMessage(nil, lWin, FPGM_MOUSEEXIT);
 end;
 
@@ -1378,6 +1769,13 @@ begin
     begin
       lWin.FInDecorArea := False;
       lWin.DoSetMouseCursor;
+      { Clear any titlebar button hover so the dot dims again. }
+      if lWin.FHoverButton <> tbNone then
+      begin
+        lWin.FHoverButton := tbNone;
+        if Assigned(lWin.Owner) then
+          TfpgWidget(lWin.Owner).InvalidateRect(fpgRect(0, 0, lWin.Width, lWin.Height));
+      end;
     end;
     fpgPostMessage(nil, lWin, FPGM_MOUSEMOVE, msgp);
   end;
@@ -1536,6 +1934,12 @@ begin
   FIsInitialized:=False;
   FPopupStack := TFPList.Create;
 
+  { Default client-side decoration style (mac dots). Apps may change this via
+    DecorationStyle or supply a custom DecorationDrawer. }
+  FDecorationStyle := wdsMac;
+  FDecorationDrawer := TfpgWaylandMacDecorationDrawer.Create;
+  FOwnsDecorationDrawer := True;
+
   FKeyboardRepeatDelay:=300;
   FKeyboardRepeatRate:=40;
   if Supports(self, ICmdLineParams, cmd) and cmd.HasOption('display') then
@@ -1582,10 +1986,49 @@ end;
 
 destructor TfpgWaylandApplication.Destroy;
 begin
+  if FOwnsDecorationDrawer then
+    FDecorationDrawer.Free;
   FDisplay.Free;
   FPopupStack.Free;
   UnLoadFontConfigLib;
   inherited Destroy;
+end;
+
+procedure TfpgWaylandApplication.SetDecorationDrawer(AValue: TfpgWaylandDecorationDrawer);
+begin
+  if AValue = FDecorationDrawer then
+    Exit;
+  if FOwnsDecorationDrawer then
+    FDecorationDrawer.Free;
+  if AValue = nil then
+  begin
+    { Restore the current built-in style. }
+    FOwnsDecorationDrawer := True;
+    case FDecorationStyle of
+      wdsClassic: FDecorationDrawer := TfpgWaylandClassicDecorationDrawer.Create;
+    else
+      FDecorationDrawer := TfpgWaylandMacDecorationDrawer.Create;
+    end;
+  end
+  else
+  begin
+    { Caller-supplied drawer; the application does not own it. }
+    FDecorationDrawer := AValue;
+    FOwnsDecorationDrawer := False;
+  end;
+end;
+
+procedure TfpgWaylandApplication.SetDecorationStyle(AValue: TfpgWaylandDecorationStyle);
+begin
+  FDecorationStyle := AValue;
+  if FOwnsDecorationDrawer then
+    FDecorationDrawer.Free;
+  FOwnsDecorationDrawer := True;
+  case AValue of
+    wdsClassic: FDecorationDrawer := TfpgWaylandClassicDecorationDrawer.Create;
+  else
+    FDecorationDrawer := TfpgWaylandMacDecorationDrawer.Create;
+  end;
 end;
 
 function TfpgWaylandApplication.GetScreenWidth: TfpgCoord;

@@ -172,6 +172,10 @@ var
 begin
   if not Assigned(FWin) or not BufferAllocated then
     Exit;
+  { xdg-shell: do not attach a buffer before the surface's first configure has
+    been acked, or the compositor will not map the surface. }
+  if not FWin.Configured then
+    Exit;
   if (w < 1) or (h < 1) or not Assigned(FWin.SurfaceShell) then
     Exit;
 

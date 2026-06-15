@@ -1,28 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project>
-  <name>examples-gui-helloworld</name>
+  <name>examples-wayland-grabtest</name>
   <version>1.0.0</version>
 
   <build>
-    <mainSource>helloworld.lpr</mainSource>
+    <mainSource>grabtest.lpr</mainSource>
     <sourceDirectory>.</sourceDirectory>
-    <executableName>helloworld</executableName>
+    <executableName>grabtest</executableName>
   </build>
 
-  <profiles>
-    <profile>
-      <id>wayland</id>
-      <defines>
-        <define>WAYLAND</define>
-      </defines>
-    </profile>
-  </profiles>
-
   <dependencies>
-    <dependency>
-      <name>fpgui-framework</name>
-      <version>2.1.0</version>
-    </dependency>
     <dependency>
       <name>wayland-classes</name>
       <version>1.0.0</version>
