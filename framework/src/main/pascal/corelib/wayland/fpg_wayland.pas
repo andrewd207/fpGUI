@@ -20,7 +20,7 @@
 interface
 
 uses
-  Classes, SysUtils, fpg_base, fpg_wayland_classes,
+  Classes, SysUtils, fpg_base, fpg_wayland_classes, desktop_theme,
   agg_2D,
   libfontconfig,
   dynlibs,
@@ -35,7 +35,7 @@ type
   TfpgwTitleButton = (tbNone, tbClose, tbMaximize, tbMinimize);
 
   { Built-in client-side decoration button styles. }
-  TfpgWaylandDecorationStyle = (wdsMac, wdsClassic);
+  TfpgWaylandDecorationStyle = (wdsMac, wdsClassic, wdsAdwaita);
 
   TfpgWaylandWindow = class;  { forward }
 
@@ -71,6 +71,7 @@ type
     FInsetLeft, FInsetTop, FInsetRight, FInsetBottom: Integer;
     FInDecorArea: Boolean;  { pointer currently over the decoration frame }
     FHoverButton: TfpgwTitleButton;  { titlebar button under the pointer }
+    FArmedButton: TfpgwTitleButton;  { button pressed but not yet released (GTK-style) }
     FLastTitleClickTime: LongWord;   { for titlebar double-click detection }
     FSizeable: Boolean;     { waSizeable: allow interactive resize (else fixed) }
     procedure DecoratorConfigure(Sender: TObject; AEdges: LongWord; AWidth,
@@ -104,6 +105,11 @@ type
     procedure   DecoratorDraw(ABuffer: TfpgwBuffer);
     procedure   HandleDecorationButton(AMsg: DWord; ATime: LongWord; AParams: TfpgMessageParams);
     procedure   HandleDecorationMove;
+    { While a titlebar button is armed (pressed, not released), if the pointer
+      has dragged off that button, abandon the press and start a window move —
+      matching GTK, where dragging off a header button moves the window instead
+      of activating it. Returns True if it converted to a move. }
+    function    DecorationArmedDragCheck: Boolean;
     { Which titlebar window button (close/max/min) the pointer is over, given
       surface-relative coords; tbNone if not over a button. }
     function    TitlebarButtonHit(ASurfX, ASurfY: Integer): TfpgwTitleButton;
@@ -199,6 +205,37 @@ type
   end;
 
 
+  { GNOME / Adwaita look: header-bar colours, accent, button layout and side all
+    pulled live from the running desktop (via the desktop_theme unit), flat
+    circular symbolic window buttons, and a centred title. Owns its theme reader.
+    Overrides DrawFrame/ButtonHit wholesale because the base assumes three
+    right-aligned buttons, while Adwaita honours an arbitrary layout per side. }
+  TfpgWaylandAdwaitaDecorationDrawer = class(TfpgWaylandDecorationDrawer)
+  private
+    FTheme: TDesktopTheme;
+    FBtnRadius: Integer;
+    FBtnSpacing: Integer;   { centre-to-centre }
+    FBtnMargin: Integer;    { frame edge -> first button circle edge }
+    { Lay out the title buttons for AWin in canonical order (min, max, close) on
+      each side. Fills ABtns/ACxs with ACount entries and reports the inner text
+      bounds (the x-range free of buttons). }
+    procedure ComputeSlots(AWin: TfpgWaylandWindow;
+      out ABtns: array of TfpgwTitleButton; out ACxs: array of Integer;
+      out ACount: Integer; out ATextLeft, ATextRight: Integer);
+  protected
+    procedure DrawButtons(var agg: agg_2D.Agg2D; ACloseCX, ACY: Integer;
+      AHover: TfpgwTitleButton); override;  { unused; DrawFrame is overridden }
+  public
+    constructor Create; override;
+    destructor  Destroy; override;
+    function  ButtonHit(AWin: TfpgWaylandWindow; ASurfX, ASurfY: Integer): TfpgwTitleButton; override;
+    procedure DrawFrame(AWin: TfpgWaylandWindow; ABuffer: Pointer; ABufW, ABufH: Integer); override;
+    { Re-read the desktop appearance (e.g. after a dark-mode toggle). }
+    procedure RefreshTheme;
+    property Theme: TDesktopTheme read FTheme;
+  end;
+
+
   { TfpgWaylandApplication }
 
   TfpgWaylandApplication = class (TfpgApplicationBase)
@@ -260,6 +297,10 @@ type
     destructor  Destroy; override;
     procedure   QueuePresent(ABufferManager: TObject);
     procedure   UnqueuePresent(ABufferManager: TObject);
+    { Drop any queued present bound to AWindow — called as a native window is
+      destroyed (e.g. on hide), before the surface/viewport proxy dies, so a
+      stale present is never flushed to it. }
+    procedure   ForgetWindowPresents(AWindow: TfpgWindowBase);
     { Called when fpGUI itself starts an interactive decoration move/resize, so
       the ensuing compositor keyboard-leave does not deactivate the window. }
     procedure   BeginDecorationGrab;
@@ -546,12 +587,14 @@ end;
 
 function TfpgWaylandClipboard.DoGetText: TfpgString;
 begin
-  Result := '';
+  { Read the current selection (clipboard) as UTF-8 text via wl_data_offer. }
+  Result := WApplication.Display.ClipboardText;
 end;
 
 procedure TfpgWaylandClipboard.DoSetText(const AValue: TfpgString);
 begin
-
+  { Become the selection owner with the given text. }
+  WApplication.Display.SetClipboardText(AValue);
 end;
 
 procedure TfpgWaylandClipboard.InitClipboard;
@@ -1265,6 +1308,257 @@ begin
   agg.line(ACloseCX - S, ACY + S, ACloseCX + S, ACY - S);
 end;
 
+{ TfpgWaylandAdwaitaDecorationDrawer }
+
+constructor TfpgWaylandAdwaitaDecorationDrawer.Create;
+begin
+  inherited Create;
+  FTheme := CreateDesktopTheme;          { detects GNOME/KDE, already Refreshed }
+  FTitlebarHeight  := 38;                 { Adwaita header bar is taller than the dots style }
+  FBorderWidth     := CSD_FRAME_BORDER;
+  FCornerRadius    := 12;
+  FBtnRadius       := 11;
+  FBtnSpacing      := 30;
+  FBtnMargin       := 6;
+  FButtonHitRadius := FBtnRadius;
+  FTitlebarColor   := TfpgColor(FTheme.HeaderbarBg);
+  FTitleTextColor  := TfpgColor(FTheme.HeaderbarFg);
+end;
+
+destructor TfpgWaylandAdwaitaDecorationDrawer.Destroy;
+begin
+  FTheme.Free;
+  inherited Destroy;
+end;
+
+procedure TfpgWaylandAdwaitaDecorationDrawer.RefreshTheme;
+begin
+  FTheme.Refresh;
+  FTitlebarColor  := TfpgColor(FTheme.HeaderbarBg);
+  FTitleTextColor := TfpgColor(FTheme.HeaderbarFg);
+end;
+
+procedure TfpgWaylandAdwaitaDecorationDrawer.DrawButtons(var agg: agg_2D.Agg2D;
+  ACloseCX, ACY: Integer; AHover: TfpgwTitleButton);
+begin
+  { Unused: this drawer overrides DrawFrame and lays buttons out itself. }
+end;
+
+procedure TfpgWaylandAdwaitaDecorationDrawer.ComputeSlots(AWin: TfpgWaylandWindow;
+  out ABtns: array of TfpgwTitleButton; out ACxs: array of Integer;
+  out ACount: Integer; out ATextLeft, ATextRight: Integer);
+const
+  { Canonical left-to-right order within either side. }
+  Order: array[0..2] of TDesktopWindowButton = (dwbMinimize, dwbMaximize, dwbClose);
+
+  function Map(b: TDesktopWindowButton): TfpgwTitleButton;
+  begin
+    case b of
+      dwbMinimize: Result := tbMinimize;
+      dwbMaximize: Result := tbMaximize;
+    else
+      Result := tbClose;
+    end;
+  end;
+
+var
+  iL, iR, dispW, i: Integer;
+  leftCenter, rightCenter: Integer;
+  leftList, rightList: array[0..2] of TfpgwTitleButton;
+  leftN, rightN: Integer;
+begin
+  iL := AWin.InsetLeft;  iR := AWin.InsetRight;
+  dispW := AWin.Width + iL + iR;
+
+  leftN := 0; rightN := 0;
+  for i := 0 to 2 do
+  begin
+    if Order[i] in FTheme.ButtonsLeft then begin leftList[leftN] := Map(Order[i]); Inc(leftN); end;
+    if Order[i] in FTheme.ButtonsRight then begin rightList[rightN] := Map(Order[i]); Inc(rightN); end;
+  end;
+
+  ACount := 0;
+
+  { Left side: first button hugs the left edge, stepping right. }
+  leftCenter := iL + FBtnMargin + FBtnRadius;
+  for i := 0 to leftN - 1 do
+  begin
+    ABtns[ACount] := leftList[i];
+    ACxs[ACount] := leftCenter + i * FBtnSpacing;
+    Inc(ACount);
+  end;
+
+  { Right side: last button hugs the right edge, earlier ones step left. }
+  rightCenter := dispW - iR - FBtnMargin - FBtnRadius;
+  for i := 0 to rightN - 1 do
+  begin
+    ABtns[ACount] := rightList[i];
+    ACxs[ACount] := rightCenter - (rightN - 1 - i) * FBtnSpacing;
+    Inc(ACount);
+  end;
+
+  { Text occupies whatever is left between the two button blocks. }
+  if leftN > 0 then
+    ATextLeft := leftCenter + (leftN - 1) * FBtnSpacing + FBtnRadius + 8
+  else
+    ATextLeft := iL + 8;
+  if rightN > 0 then
+    ATextRight := rightCenter - (rightN - 1) * FBtnSpacing - FBtnRadius - 8
+  else
+    ATextRight := dispW - iR - 8;
+end;
+
+function TfpgWaylandAdwaitaDecorationDrawer.ButtonHit(AWin: TfpgWaylandWindow;
+  ASurfX, ASurfY: Integer): TfpgwTitleButton;
+var
+  btns: array[0..2] of TfpgwTitleButton;
+  cxs: array[0..2] of Integer;
+  n, i, cy, tl, tr: Integer;
+begin
+  Result := tbNone;
+  ComputeSlots(AWin, btns, cxs, n, tl, tr);
+  cy := AWin.InsetTop div 2;
+  for i := 0 to n - 1 do
+    if (Abs(ASurfX - cxs[i]) <= FBtnRadius + 2)
+    and (Abs(ASurfY - cy) <= FBtnRadius + 2) then
+      Exit(btns[i]);
+end;
+
+procedure TfpgWaylandAdwaitaDecorationDrawer.DrawFrame(AWin: TfpgWaylandWindow;
+  ABuffer: Pointer; ABufW, ABufH: Integer);
+var
+  agg: agg_2D.Agg2D;
+  iL, iT, iR, iB, dispW, dispH, stride, row, cy, i, n, tl, tr: Integer;
+  br, bg, bb, fr, fg, fb: byte;
+  btns: array[0..2] of TfpgwTitleButton;
+  cxs: array[0..2] of Integer;
+  font: TfpgFontResourceBase;
+  tw, tx: Integer;
+  active: Boolean;
+  useBg, useFg: LongWord;
+
+  procedure RGB(AColor: LongWord; out r, g, b: byte);
+  begin
+    r := (AColor shr 16) and $FF;
+    g := (AColor shr 8) and $FF;
+    b := AColor and $FF;
+  end;
+
+  { Per-channel linear blend of two $00RRGGBB colours; APct is 0..100 toward B. }
+  function Blend(A, B: LongWord; APct: Integer): LongWord;
+    function Mix(ca, cb: Integer): LongWord;
+    begin
+      Result := LongWord((ca * (100 - APct) + cb * APct) div 100) and $FF;
+    end;
+  begin
+    Result := (Mix((A shr 16) and $FF, (B shr 16) and $FF) shl 16)
+           or (Mix((A shr 8) and $FF, (B shr 8) and $FF) shl 8)
+           or  Mix(A and $FF, B and $FF);
+  end;
+
+  procedure DrawButton(ABtn: TfpgwTitleButton; ACx, ACy: Integer; AHover: Boolean);
+  const
+    S = 4;  { glyph half-size }
+  begin
+    { Flat circular background: faint always, stronger on hover (Adwaita-like). }
+    agg.noLine;
+    if AHover then
+      agg.fillColor(fr, fg, fb, 55)
+    else
+      agg.fillColor(fr, fg, fb, 22);
+    agg.resetPath;
+    agg.addEllipse(ACx, ACy, FBtnRadius, FBtnRadius, agg_2D.CW);
+    agg.drawPath(agg_2D.FillOnly);
+
+    { Symbolic glyph in the foreground colour. }
+    agg.noFill;
+    agg.lineColor(fr, fg, fb, 255);
+    agg.lineWidth(1.5);
+    case ABtn of
+      tbMinimize:
+        agg.line(ACx - S, ACy + 1, ACx + S, ACy + 1);
+      tbMaximize:
+        agg.rectangle(ACx - S, ACy - S, ACx + S, ACy + S);
+      tbClose:
+        begin
+          agg.line(ACx - S, ACy - S, ACx + S, ACy + S);
+          agg.line(ACx - S, ACy + S, ACx + S, ACy - S);
+        end;
+    end;
+  end;
+
+begin
+  iL := AWin.InsetLeft;  iT := AWin.InsetTop;
+  iR := AWin.InsetRight; iB := AWin.InsetBottom;
+  dispW := AWin.Width + iL + iR;
+  dispH := AWin.Height + iT + iB;
+  stride := ABufW * 4;
+
+  { Dim the titlebar when the window is not the focused (activated) one, like
+    native GTK apps do in their "backdrop" state: flatten the background a touch
+    and fade the title/buttons toward it so they read as inactive. }
+  active := (AWin.WinHandle = nil) or AWin.WinHandle.IsActive;
+  if active then
+  begin
+    useBg := FTheme.HeaderbarBg;
+    useFg := FTheme.HeaderbarFg;
+  end
+  else
+  begin
+    useBg := Blend(FTheme.HeaderbarBg, FTheme.HeaderbarFg, 8);
+    useFg := Blend(FTheme.HeaderbarFg, FTheme.HeaderbarBg, 45);
+  end;
+  RGB(useBg, br, bg, bb);
+  RGB(useFg, fr, fg, fb);
+
+  { Clear the titlebar strip to transparent so the rounded top corners show the
+    desktop through them (AggPas blends, so it can't clear to transparent). }
+  for row := 0 to iT - 1 do
+    FillDWord((PByte(ABuffer) + row * stride)^, dispW, 0);
+
+  agg.Construct;
+  try
+    agg.attach(int8u_ptr(ABuffer), ABufW, ABufH, stride);
+    agg.noLine;
+
+    { Titlebar: rounded top, square bottom. }
+    agg.fillColor(br, bg, bb, 255);
+    if FCornerRadius > 0 then
+    begin
+      agg.roundedRect(0, 0, dispW, 2 * FCornerRadius, FCornerRadius);
+      agg.rectangle(0, FCornerRadius, dispW, iT);
+    end
+    else
+      agg.rectangle(0, 0, dispW, iT);
+
+    { Side and bottom borders in the same header colour. }
+    if iL > 0 then agg.rectangle(0, iT, iL, dispH);
+    if iR > 0 then agg.rectangle(dispW - iR, iT, dispW, dispH);
+    if iB > 0 then agg.rectangle(0, dispH - iB, dispW, dispH);
+
+    { Window buttons, laid out per the desktop's button-layout. }
+    ComputeSlots(AWin, btns, cxs, n, tl, tr);
+    cy := iT div 2;
+    for i := 0 to n - 1 do
+      DrawButton(btns[i], cxs[i], cy, AWin.HoverButton = btns[i]);
+  finally
+    agg.Destruct;
+  end;
+
+  { Title text, centred in the space left between the button blocks. }
+  font := fpgApplication.FontManager.GetDefaultFont;
+  if Assigned(font) and (AWin.Title <> '') and (tr > tl) then
+  begin
+    tw := font.GetTextWidth(AWin.Title);
+    tx := tl + ((tr - tl) - tw) div 2;
+    if tx < tl then tx := tl;
+    font.DrawTextToBuffer(PByte(ABuffer), stride, ABufW, ABufH,
+      tx, (iT - font.GetHeight) div 2 + font.GetAscent,
+      AWin.Title, TfpgColor(useFg),
+      tl, 0, tr - tl, iT);
+  end;
+end;
+
 procedure TfpgWaylandWindow.HandleDecorationButton(AMsg: DWord;
   ATime: LongWord; AParams: TfpgMessageParams);
 var
@@ -1272,30 +1566,52 @@ var
   lBtn: TfpgwTitleButton;
   sx, sy: Integer;
 begin
-  if AMsg <> FPGM_MOUSEDOWN then
-    Exit;
-
   sx := FMousePos.X + FInsetLeft;
   sy := FMousePos.Y + FInsetTop;
 
-  { 1) Titlebar window buttons take priority over move/resize. }
+  { Mouse-up: a titlebar button fires now (GTK-style: on release, not press) but
+    only if the pointer is still on the button it was armed on. Any drag off the
+    button already converted the press into a move (DecorationArmedDragCheck). }
+  if AMsg = FPGM_MOUSEUP then
+  begin
+    if FArmedButton <> tbNone then
+    begin
+      lBtn := FArmedButton;
+      FArmedButton := tbNone;
+      if TitlebarButtonHit(sx, sy) = lBtn then
+        case lBtn of
+          tbClose:    SendCloseWindowMessage(Self);
+          tbMaximize: FWinHandle.SurfaceShell.SetMaximized(not FWinHandle.SurfaceShell.IsMaximized);
+          tbMinimize: FWinHandle.SurfaceShell.SetMinimized;
+        end;
+      if Assigned(Owner) then
+        TfpgWidget(Owner).InvalidateRect(fpgRect(0, 0, Width, Height));
+    end;
+    Exit;
+  end;
+
+  if AMsg <> FPGM_MOUSEDOWN then
+    Exit;
+
+  { 0) Right-click in the titlebar (move zone, not the resize edges) pops up the
+       compositor's native window menu, like the GNOME titlebar. Takes priority
+       over the window buttons so a right-click over Close shows the menu rather
+       than closing. sx,sy are surface coords = window-geometry-relative origin
+       (we don't set a custom geometry, so the origin is the surface top-left). }
+  if AParams.mouse.Buttons = MOUSE_RIGHT then
+  begin
+    if DecorationHitTest = WL_SHELL_SURFACE_RESIZE_NONE then
+      FWinHandle.SurfaceShell.ShowWindowMenu(FWinHandle.Display.EventSerial, sx, sy);
+    Exit;
+  end;
+
+  { 1) Press on a titlebar window button: arm it but don't act yet — the action
+       fires on release, and a drag off the button turns into a window move. }
   lBtn := TitlebarButtonHit(sx, sy);
-  case lBtn of
-    tbClose:
-      begin
-        SendCloseWindowMessage(Self);
-        Exit;
-      end;
-    tbMaximize:
-      begin
-        FWinHandle.SurfaceShell.SetMaximized(not FWinHandle.SurfaceShell.IsMaximized);
-        Exit;
-      end;
-    tbMinimize:
-      begin
-        FWinHandle.SurfaceShell.SetMinimized;
-        Exit;
-      end;
+  if lBtn <> tbNone then
+  begin
+    FArmedButton := lBtn;
+    Exit;
   end;
 
   lEdge := DecorationHitTest;
@@ -1319,6 +1635,31 @@ begin
     FWinHandle.SurfaceShell.Move(FWinHandle.Display.EventSerial)
   else
     FWinHandle.SurfaceShell.Resize(FWinHandle.Display.EventSerial, lEdge);
+end;
+
+function TfpgWaylandWindow.DecorationArmedDragCheck: Boolean;
+begin
+  Result := False;
+  if FArmedButton = tbNone then
+    Exit;
+  { Still on the armed button? Stay armed (release will activate it). }
+  if TitlebarButtonHit(FMousePos.X + FInsetLeft, FMousePos.Y + FInsetTop) = FArmedButton then
+    Exit;
+  { Dragged off the button: cancel the press and begin a window move. The
+    compositor grab takes over, so no release will reach us to fire the button.
+    Use ButtonPressSerial, not EventSerial: this runs during a motion event, and
+    xdg_toplevel.move only honours the serial of the still-held button PRESS
+    (EventSerial has since been overwritten by the motion events). }
+  FArmedButton := tbNone;
+  if FHoverButton <> tbNone then
+  begin
+    FHoverButton := tbNone;
+    if Assigned(Owner) then
+      TfpgWidget(Owner).InvalidateRect(fpgRect(0, 0, Width, Height));
+  end;
+  WApplication.BeginDecorationGrab;
+  FWinHandle.SurfaceShell.Move(FWinHandle.Display.ButtonPressSerial);
+  Result := True;
 end;
 
 function TfpgWaylandWindow.DecorationHitTest: DWord;
@@ -1465,6 +1806,10 @@ end;
 
 destructor TfpgWaylandWindow.Destroy;
 begin
+  { Drop any pending present bound to this window before its surface/viewport
+    proxy is torn down, so FlushPendingPresents can't marshal to a dead proxy. }
+  if Assigned(fpgApplication) then
+    TfpgWaylandApplication(fpgApplication).ForgetWindowPresents(Self);
   fpgDeleteMessagesForTarget(Self);
   inherited Destroy;
 end;
@@ -1769,6 +2114,7 @@ var
   lWin: TfpgWaylandWindow absolute Sender;
 begin
   lWin.FInDecorArea := False;
+  lWin.FArmedButton := tbNone;  { drop any pending button press on leave }
   { Clear titlebar button hover so the dot dims when the pointer leaves. }
   if lWin.FHoverButton <> tbNone then
   begin
@@ -1788,6 +2134,12 @@ begin
   lWin.AdjustMousePos(AX, AY); { translate surface coords to content coords }
 
   lWin.FMousePos.SetPoint(AX, AY);
+
+  { A press armed on a titlebar button that now drags off becomes a window move
+    (GTK-style). Once converted, the compositor owns the grab — stop here. }
+  if lWin.DecorationArmedDragCheck then
+    Exit;
+
   msgp.mouse.x          := ax;
   msgp.mouse.y          := ay;
   if ssLeft in FShiftState then
@@ -1954,6 +2306,21 @@ begin
     FPendingPresents.Remove(ABufferManager);
 end;
 
+procedure TfpgWaylandApplication.ForgetWindowPresents(AWindow: TfpgWindowBase);
+var
+  i: Integer;
+  mgr: TWaylandBufferManager;
+begin
+  if not Assigned(FPendingPresents) then
+    Exit;
+  for i := FPendingPresents.Count - 1 downto 0 do
+  begin
+    mgr := TWaylandBufferManager(FPendingPresents[i]);
+    if mgr.AttachedWindow = AWindow then
+      mgr.ForgetWindow;   { clears state and removes itself from the queue }
+  end;
+end;
+
 procedure TfpgWaylandApplication.FlushPendingPresents;
 var
   i: Integer;
@@ -2030,11 +2397,20 @@ begin
   FPopupStack := TFPList.Create;
   FPendingPresents := TFPList.Create;
 
-  { Default client-side decoration style (mac dots). Apps may change this via
+  { Default client-side decoration style: match the native GNOME/Adwaita look
+    when running under GNOME, mac dots elsewhere. Apps may override via
     DecorationStyle or supply a custom DecorationDrawer. }
-  FDecorationStyle := wdsMac;
-  FDecorationDrawer := TfpgWaylandMacDecorationDrawer.Create;
   FOwnsDecorationDrawer := True;
+  if Pos('gnome', LowerCase(GetEnvironmentVariable('XDG_CURRENT_DESKTOP'))) > 0 then
+  begin
+    FDecorationStyle := wdsAdwaita;
+    FDecorationDrawer := TfpgWaylandAdwaitaDecorationDrawer.Create;
+  end
+  else
+  begin
+    FDecorationStyle := wdsMac;
+    FDecorationDrawer := TfpgWaylandMacDecorationDrawer.Create;
+  end;
 
   FKeyboardRepeatDelay:=300;
   FKeyboardRepeatRate:=40;
@@ -2103,6 +2479,7 @@ begin
     FOwnsDecorationDrawer := True;
     case FDecorationStyle of
       wdsClassic: FDecorationDrawer := TfpgWaylandClassicDecorationDrawer.Create;
+      wdsAdwaita: FDecorationDrawer := TfpgWaylandAdwaitaDecorationDrawer.Create;
     else
       FDecorationDrawer := TfpgWaylandMacDecorationDrawer.Create;
     end;
@@ -2123,6 +2500,7 @@ begin
   FOwnsDecorationDrawer := True;
   case AValue of
     wdsClassic: FDecorationDrawer := TfpgWaylandClassicDecorationDrawer.Create;
+    wdsAdwaita: FDecorationDrawer := TfpgWaylandAdwaitaDecorationDrawer.Create;
   else
     FDecorationDrawer := TfpgWaylandMacDecorationDrawer.Create;
   end;

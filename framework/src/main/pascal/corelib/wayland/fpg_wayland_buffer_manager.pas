@@ -66,6 +66,12 @@ type
       can drop it from the pending list), False if it must be retried next pass
       (surface not yet configured, or both present buffers still held). }
     function FlushPending: Boolean;
+    { Called when the bound native window is being destroyed: drop any pending
+      present and unqueue from the app, so a stale present is never flushed to a
+      freed surface/viewport. }
+    procedure ForgetWindow;
+    { The native window this manager draws to (nil once detached/forgotten). }
+    property AttachedWindow: TfpgWindowBase read FWindow;
     { IBufferManager }
     procedure AttachWindow(AWindow: TfpgWindowBase);
     procedure DetachWindow;
@@ -116,6 +122,15 @@ procedure TWaylandBufferManager.DetachWindow;
 begin
   FWin := nil;
   FWindow := nil;
+end;
+
+procedure TWaylandBufferManager.ForgetWindow;
+begin
+  FHasPending := False;
+  FWin := nil;
+  FWindow := nil;
+  if Assigned(fpgApplication) then
+    TfpgWaylandApplication(fpgApplication).UnqueuePresent(Self);
 end;
 
 procedure TWaylandBufferManager.AllocateBuffer(AWidth, AHeight: Integer;
