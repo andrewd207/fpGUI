@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+#
+# pasbuild-wayland-units — PasBuild plugin (manual goal: `pasbuild wayland-units`)
+#
+# Copies the prebuilt pure-Pascal `wayl` Wayland binding units (.ppu + .o) from
+# the local PasBuild repository into framework/target/units. This lets the fpGUI
+# Wayland backend build WITHOUT declaring wayland-classes as a <dependency> — so
+# an X11 (or Windows/macOS) build needs none of the Wayland packages installed.
+#
+# Why framework/target/units: every fpGUI module depends on fpgui-framework, and
+# `pasbuild install` copies the whole units dir into the installed package. So
+# bundling the Wayland units here makes them install alongside the framework and
+# land on the -Fu path of every dependent module (ide, uidesigner, examples, …).
+# X11 builds simply never `uses` them.
+#
+# This is NOT an automatic hook — pasbuild plugins are explicit goals. Run it
+# manually before a Wayland build, AFTER any `pasbuild clean` of the framework
+# (clean wipes target/units):
+#
+#     pasbuild wayland-units                       # populate framework/target/units
+#     pasbuild install -p wayland -m fpgui-framework
+#     pasbuild install -p wayland -m fpgui-ide     # -> ide/target/maximus
+#
+# Requires the `wayl` project to have been built+installed first
+# (cd ~/Programming/Projects/LazarusProjects/wayl && pasbuild install).
+#
+set -euo pipefail
+
+# Phase declaration. "none" => pasbuild runs this plugin on its own, with no
+# dependency goal (we do not need any other goal to run first).
+if [[ "${1:-}" == "--pasbuild-phase" ]]; then
+  echo "none"
+  exit 0
+fi
+
+PROJECT_DIR="${PASBUILD_PROJECT_DIR:-$(pwd)}"
+REPO="${PASBUILD_REPOSITORY:-$HOME/.pasbuild/repository}"
+# The wayl binding's package version (override with WAYL_VERSION if it changes).
+VERSION="${WAYL_VERSION:-0.1.0}"
+DEST="$PROJECT_DIR/framework/target/units"
+
+# wayland-rt carries the core + xkb; the protocol tiers + the OOP classes layer
+# are referenced from fpg_wayland_classes' interface, so all are needed to
+# compile the backend.
+PACKAGES=(wayland-rt wayland-stable wayland-unstable wayland-staging wayland-classes)
+
+mkdir -p "$DEST"
+
+copied=0
+missing=0
+for pkg in "${PACKAGES[@]}"; do
+  # $REPO/<pkg>/<version>/<target-triple>/units — pick the (single) triple dir.
+  unitdir=$(ls -d "$REPO/$pkg/$VERSION"/*/units 2>/dev/null | head -n1 || true)
+  if [[ -z "$unitdir" || ! -d "$unitdir" ]]; then
+    echo "[wayland-units] MISSING: $pkg $VERSION not in $REPO — build/install the wayl project first" >&2
+    missing=$((missing+1))
+    continue
+  fi
+  for f in "$unitdir"/*.ppu "$unitdir"/*.o; do
+    [[ -e "$f" ]] || continue
+    cp -f "$f" "$DEST/"
+    copied=$((copied+1))
+  done
+  echo "[wayland-units] $pkg $VERSION  <-  $unitdir"
+done
+
+echo "[wayland-units] copied $copied unit files into $DEST"
+if [[ "$missing" -gt 0 ]]; then
+  echo "[wayland-units] $missing package(s) missing — Wayland build will fail until installed" >&2
+  exit 1
+fi

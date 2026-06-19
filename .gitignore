@@ -9,6 +9,9 @@
 
 ### Above combination will ignore all files without extensions.
 
+# ...except the pasbuild plugin (must be named pasbuild-<goal>, no extension).
+!plugins/pasbuild-wayland-units
+
 ### Now apply the usuage ignored files.
 
 # FPC compiler-generated binaries (safe to delete)

@@ -43,14 +43,6 @@
        the Wayland bindings. Unconditional (PasBuild deps have no conditions),
        so the bindings must be installed even for X11 builds. -->
   <dependencies>
-    <dependency>
-      <name>wayland-classes</name>
-      <version>1.0.0</version>
-    </dependency>
-    <dependency>
-      <name>support</name>
-      <version>1.0.0</version>
-    </dependency>
     <!-- OPDF debugger (FPC 3.3.x): provides pdr_ports etc. for
          ide.debug.adapter. On FPC 3.2.x the IDE uses the no-op stub. -->
     <dependency>

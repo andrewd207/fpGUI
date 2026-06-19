@@ -23,7 +23,13 @@ unit fpg_impl;
 interface
 
 uses
-  wayland_protocol, fpg_wayland_classes;
+  { `wayland` (+ the other wayl binding units used across this backend) is NOT a
+    declared pasbuild <dependency> — it is supplied as prebuilt units bundled
+    into framework/target/units by the `pasbuild wayland-units` plugin (see
+    plugins/pasbuild-wayland-units). If this line fails with
+    "Can't find unit wayland", run `pasbuild wayland-units` before the Wayland
+    build (and after any `pasbuild clean`, which wipes the bundled units). }
+  wayland, fpg_wayland_classes;
 
 type
   TfpgWinHandle = TfpgwWindow;

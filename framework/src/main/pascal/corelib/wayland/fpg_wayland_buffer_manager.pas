@@ -27,7 +27,7 @@ uses
   fpg_impl,
   fpg_wayland,
   fpg_wayland_classes,
-  wayland_protocol;
+  wayland;
 
 type
 
@@ -239,12 +239,13 @@ end;
 procedure TWaylandBufferManager.Present(ABufIdx: Integer; x, y, w, h: TfpgCoord);
 var
   L, T, R, B: Integer;
+  row: Integer;
   win: TfpgWaylandWindow;
   buf: TfpgwBuffer;
 begin
   buf := FPresent[ABufIdx];
   if not buf.Allocated[FBufWidth, FBufHeight] then
-    buf.Allocate(FBufWidth, FBufHeight, WL_SHM_FORMAT_ARGB8888);
+    buf.Allocate(FBufWidth, FBufHeight, TWlShm.TFormat.foArgb8888);
 
   L := 0; T := 0; R := 0; B := 0;
   if Assigned(FWindow) then
@@ -260,8 +261,21 @@ begin
   end;
 
   { Copy the freshly-drawn master into the free present buffer, then attach
-    that — the compositor never reads the master we draw into. }
-  Move(FMaster^, buf.Data^, FStride * FBufHeight);
+    that — the compositor never reads the master we draw into. The present
+    buffer's row pitch (buf.Stride) is decided by its backend and need NOT
+    equal the master's FStride: wl_shm packs tightly at FBufWidth*4, but the
+    dma-buf backend pads each row to a 256-byte boundary. Copy row by row
+    honouring both strides, and bracket the write with Begin/EndAccess so the
+    dma-buf backend can flush CPU caches (DMA_BUF_IOCTL_SYNC) — a no-op for shm. }
+  buf.BeginAccess;
+  if buf.Stride = FStride then
+    Move(FMaster^, buf.Data^, FStride * FBufHeight)
+  else
+    for row := 0 to FBufHeight - 1 do
+      Move((PByte(FMaster) + row * FStride)^,
+           (PByte(buf.Data) + row * buf.Stride)^,
+           FBufWidth * 4);
+  buf.EndAccess;
   buf.Busy := True;
 
   FWin.SurfaceShell.Surface.Attach(buf.Buffer, 0, 0);
@@ -272,7 +286,7 @@ begin
     { Undecorated: damage just the updated (accumulated) content region. }
     FWin.SurfaceShell.Surface.Damage(x, y, w, h);
   FWin.SurfaceShell.Surface.Commit;
-  FWin.Display.Display.Flush;
+  FWin.Display.Flush;
 end;
 
 function TWaylandBufferManager.FlushPending: Boolean;

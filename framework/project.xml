@@ -62,18 +62,17 @@
     <module>../tools/svg2hvif</module>
   </moduleDependencies>
 
-  <!-- Wayland backend dependencies (only consumed when building with -p wayland).
-       NOTE: PasBuild resolves <dependencies> unconditionally, so these must be
-       installed in the local repository even for X11 builds. -->
-  <dependencies>
-    <dependency>
-      <name>wayland-classes</name>
-      <version>1.0.0</version>
-    </dependency>
-    <dependency>
-      <name>support</name>
-      <version>1.0.0</version>
-    </dependency>
-  </dependencies>
+  <!-- The Wayland backend (built with -p wayland) uses the pure-Pascal `wayl`
+       binding (wayland-rt + protocol tiers + wayland-classes 0.1.0; no
+       libwayland; xkbcommon wrappers live in wayland-rt). These are deliberately
+       NOT declared as <dependency> entries — pasbuild resolves dependencies
+       unconditionally, which would force every X11/Windows/macOS build to also
+       have the Wayland packages installed.
+
+       Instead the prebuilt Wayland units are copied into target/units by the
+       `pasbuild wayland-units` plugin (plugins/pasbuild-wayland-units) and ride
+       along into the installed framework, so every dependent module inherits
+       them. Run it manually before a Wayland build (see that script). X11 builds
+       need nothing. -->
 
 </project>

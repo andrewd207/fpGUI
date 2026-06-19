@@ -16,14 +16,6 @@
 
   <!-- Transitive Wayland backend bindings (see fpgui-ide for rationale). -->
   <dependencies>
-    <dependency>
-      <name>wayland-classes</name>
-      <version>1.0.0</version>
-    </dependency>
-    <dependency>
-      <name>support</name>
-      <version>1.0.0</version>
-    </dependency>
   </dependencies>
 
   <test>

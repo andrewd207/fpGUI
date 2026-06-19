@@ -26,7 +26,8 @@ uses
   dynlibs,
   freetypeh,
   fpg_fontcache,
-  wayland_util,
+  wayland,
+  xdg_shell_protocol,
   libxkbcommon,
   xkb_classes;
 
@@ -69,6 +70,10 @@ type
       draws server-side decorations). The app content is drawn inset by
       (FInsetLeft, FInsetTop); the surface is content + insets. }
     FInsetLeft, FInsetTop, FInsetRight, FInsetBottom: Integer;
+    { True when the compositor draws the titlebar/border itself (server-side
+      decorations, e.g. KDE/KWin). Then FDecor is nil, insets are 0, and we draw
+      no frame of our own. }
+    FUsingServerDecorations: Boolean;
     FInDecorArea: Boolean;  { pointer currently over the decoration frame }
     FHoverButton: TfpgwTitleButton;  { titlebar button under the pointer }
     FArmedButton: TfpgwTitleButton;  { button pressed but not yet released (GTK-style) }
@@ -114,9 +119,9 @@ type
       surface-relative coords; tbNone if not over a button. }
     function    TitlebarButtonHit(ASurfX, ASurfY: Integer): TfpgwTitleButton;
     { Classify the pointer (FMousePos, content-relative) against the decoration
-      frame: returns a WL_SHELL_SURFACE_RESIZE_* edge/corner code, or
-      WL_SHELL_SURFACE_RESIZE_NONE for the titlebar move zone. }
-    function    DecorationHitTest: DWord;
+      frame: returns a TXdgToplevel.TResizeEdge edge/corner, or reNone for the
+      titlebar move zone. }
+    function    DecorationHitTest: TXdgToplevel.TResizeEdge;
     { Translate the window's WindowAttributes (waSizeable) + the primary widget's
       Min/Max size into compositor resize constraints (xdg set_min/max_size) and
       update FSizeable (which also gates our own client-side resize edges). }
@@ -269,16 +274,16 @@ type
     procedure SetDecorationStyle(AValue: TfpgWaylandDecorationStyle);
     procedure KeyboardRepeatDelayExpired(Sender: TObject);
     procedure KeyboardRepeatKeyTimer(Sender: TObject);
-    procedure SendKeyboardEnterMessage(Sender: TObject; AKeys: Pwl_array);
-    procedure SendKeyboardKey(Sender: TObject; ATime, AKey, AState: LongWord);
+    procedure SendKeyboardEnterMessage(Sender: TObject; AKeys: TBytes);
+    procedure SendKeyboardKey(Sender: TObject; ATime, AKey: LongWord; AState: TWlKeyboard.TKeyState);
     procedure SendKeyboardLeaveMessage(Sender: TObject);
-    procedure SendMouseAxisMessage(Sender: TObject; ATime: LongWord;  AAxis: LongWord; AValue: LongInt);
-    procedure SendMouseButtonMessage(Sender: TObject; ATime: LongWord; AButton: LongWord; AState: LongInt);
+    procedure SendMouseAxisMessage(Sender: TObject; ATime: LongWord;  AAxis: TWlPointer.TAxis; AValue: LongInt);
+    procedure SendMouseButtonMessage(Sender: TObject; ATime: LongWord; AButton: LongWord; AState: TWlPointer.TButtonState);
     procedure SendMouseEnterMessage(Sender: TObject; AX, AY: Integer);
     procedure SendMouseLeaveMessage(Sender: TObject);
     procedure SendMouseMotionMessage(Sender: TObject; ATime: LongWord; AX, AY: Integer);
     procedure SetKeyboardRepeat(Sender: TObject; ARate, ADelay: LongInt);
-    procedure SetupKeymap(Sender: TObject; AFormat: LongWord; AFileDesc: LongInt; ASize: LongInt);
+    procedure SetupKeymap(Sender: TObject; AFormat: TWlKeyboard.TKeymapFormat; AFileDesc: LongInt; ASize: LongInt);
     procedure UpdateKeyState(Sender: TObject; AModsDepressed, AModsLatched, AModsLocked, AGroup: LongWord);
     procedure StartRepeatDelay(AKeyCode: LongWord);
   protected
@@ -377,8 +382,8 @@ type
 
 implementation
 uses
-  fpg_cmdlineparams, fpg_main, ctypes, fpg_widget, libharfbuzz,
-  wayland_protocol, fpg_stringutils, fpg_popupwindow,
+  fpg_cmdlineparams, fpg_main, ctypes, fpg_widget,
+  fpg_stringutils, fpg_popupwindow,
   fpg_wayland_decorations, fpg_wayland_buffer_manager, agg_basics, process;
 
 { Run a command and return its trimmed stdout (with surrounding single quotes
@@ -569,21 +574,6 @@ var
   end;
 
 { TfpgWaylandClipboard }
-
-procedure SendKeyboardKey(Sender: TObject; ATime, AKey, AState: LongWord);
-begin
-  case AState of
-    WL_KEYBOARD_KEY_STATE_PRESSED:
-      begin
-
-      end;
-    WL_KEYBOARD_KEY_STATE_RELEASED:
-      begin
-
-      end;
-  end;
-
-end;
 
 function TfpgWaylandClipboard.DoGetText: TfpgString;
 begin
@@ -872,7 +862,14 @@ begin
 
     lHeight := Height;
     lWidth  := Width;
-    if WindowType in [wtWindow, wtModalForm] then
+    { Prefer server-side decorations: if the compositor draws the titlebar
+      natively (KDE/KWin), our surface is exactly the content and must NOT be
+      inflated by the client-side frame. We don't yet know whether SSD will be
+      granted, but the compositor advertising the xdg-decoration manager is a
+      reliable predictor (mutter/GNOME doesn't, so it stays CSD). The actual
+      grant is confirmed below; on the rare mismatch we still fall back to CSD. }
+    if (WindowType in [wtWindow, wtModalForm])
+    and not lDisplay.Display.SupportsServerSideDecorations then
     begin
       Inc(lHeight, TfpgWaylandDecorator.BorderHeightIncrease);
       Inc(lWidth, TfpgWaylandDecorator.BorderWidthIncrease);
@@ -881,34 +878,37 @@ begin
     end;
 
     FWinHandle := TfpgwWindow.Create(Self, lDisplay.Display, lParentWin, Left, Top, lWidth, lHeight, lPopupFor, lPopupGrab, lGrabSerial);
-    {if Assigned(FDecoratorHandle) then
-    begin
-      FDecoratorHandle.Host:= FWinHandle;
-      wl_surface_commit(FWinHandle.SurfaceShell.Surface);
-      //lDisplay.Display.Dispatch;
-    end;}
+
+    { Wire callbacks before any decoration negotiation: SetServerSideDecorations
+      roundtrips, which delivers the initial xdg configure, and that must find
+      OnConfigure/OnPaint already assigned. }
+    FWinHandle.OnPaint:=@SendPaintMessage;
+    FWinHandle.OnConfigure:=@SendConfigureMessage;
+    FWinHandle.OnClose:=@SendCloseWindowMessage;
 
     if WindowType in [wtWindow, wtModalForm] then
     begin
       FWinHandle.SurfaceShell.SetTitle(FWindowTitle);
-      { Always draw our own frame for a consistent look across compositors.
-        Ask the compositor (if it supports the protocol) not to add its own. }
-      FWinHandle.SurfaceShell.SetClientSideDecorations;
-      WApplication.DecorationDrawer.GetInsets(FInsetLeft, FInsetTop, FInsetRight, FInsetBottom);
-      FDecor := TfpgWaylandDecorator.Create(Self, FWinHandle);
-      { Expose the content origin so child popups (menus) anchor to the content,
-        not over our client-side frame. }
-      FWinHandle.ContentOffsetX := FInsetLeft;
-      FWinHandle.ContentOffsetY := FInsetTop;
+      { Ask the compositor to draw native decorations. Returns True only if it
+        actually agrees (KDE/KWin); GNOME and other CSD-only compositors return
+        False and we draw our own frame. }
+      FUsingServerDecorations := FWinHandle.SurfaceShell.SetServerSideDecorations;
+      if not FUsingServerDecorations then
+      begin
+        FWinHandle.SurfaceShell.SetClientSideDecorations;
+        WApplication.DecorationDrawer.GetInsets(FInsetLeft, FInsetTop, FInsetRight, FInsetBottom);
+        FDecor := TfpgWaylandDecorator.Create(Self, FWinHandle);
+        { Expose the content origin so child popups (menus) anchor to the content,
+          not over our client-side frame. }
+        FWinHandle.ContentOffsetX := FInsetLeft;
+        FWinHandle.ContentOffsetY := FInsetTop;
+      end;
       { Apply the initial resize constraints (fixed vs sizeable, Min/Max). }
       ApplyResizeConstraints;
     end;
 
     if WindowType = wtPopup then
       lDisplay.FPopupStack.Add(Self);
-    FWinHandle.OnPaint:=@SendPaintMessage;
-    FWinHandle.OnConfigure:=@SendConfigureMessage;
-    FWinHandle.OnClose:=@SendCloseWindowMessage;
     FWinHandle.Redraw;
     {if Assigned(FDecoratorHandle) then
     begin
@@ -1562,7 +1562,7 @@ end;
 procedure TfpgWaylandWindow.HandleDecorationButton(AMsg: DWord;
   ATime: LongWord; AParams: TfpgMessageParams);
 var
-  lEdge: DWord;
+  lEdge: TXdgToplevel.TResizeEdge;
   lBtn: TfpgwTitleButton;
   sx, sy: Integer;
 begin
@@ -1600,7 +1600,7 @@ begin
        (we don't set a custom geometry, so the origin is the surface top-left). }
   if AParams.mouse.Buttons = MOUSE_RIGHT then
   begin
-    if DecorationHitTest = WL_SHELL_SURFACE_RESIZE_NONE then
+    if DecorationHitTest = TXdgToplevel.TResizeEdge.reNone then
       FWinHandle.SurfaceShell.ShowWindowMenu(FWinHandle.Display.EventSerial, sx, sy);
     Exit;
   end;
@@ -1617,7 +1617,7 @@ begin
   lEdge := DecorationHitTest;
 
   { 2) Double-click in the titlebar move zone toggles maximize. }
-  if lEdge = WL_SHELL_SURFACE_RESIZE_NONE then
+  if lEdge = TXdgToplevel.TResizeEdge.reNone then
   begin
     if (ATime - FLastTitleClickTime) <= CSD_DOUBLECLICK_MS then
     begin
@@ -1631,10 +1631,10 @@ begin
   { 3) Otherwise start an interactive move/resize grab. Keep window focus
        appearance across the compositor's keyboard leave/enter. }
   WApplication.BeginDecorationGrab;
-  if lEdge = WL_SHELL_SURFACE_RESIZE_NONE then
+  if lEdge = TXdgToplevel.TResizeEdge.reNone then
     FWinHandle.SurfaceShell.Move(FWinHandle.Display.EventSerial)
   else
-    FWinHandle.SurfaceShell.Resize(FWinHandle.Display.EventSerial, lEdge);
+    FWinHandle.SurfaceShell.Resize(FWinHandle.Display.EventSerial, Ord(lEdge));
 end;
 
 function TfpgWaylandWindow.DecorationArmedDragCheck: Boolean;
@@ -1662,7 +1662,7 @@ begin
   Result := True;
 end;
 
-function TfpgWaylandWindow.DecorationHitTest: DWord;
+function TfpgWaylandWindow.DecorationHitTest: TXdgToplevel.TResizeEdge;
 var
   sx, sy, dispW, dispH: Integer;
   leftB, rightB, topB, bottomB: Boolean;
@@ -1671,7 +1671,7 @@ begin
     move handle so the user can still reposition it. }
   if not FSizeable then
   begin
-    Result := WL_SHELL_SURFACE_RESIZE_NONE;
+    Result := TXdgToplevel.TResizeEdge.reNone;
     Exit;
   end;
 
@@ -1690,23 +1690,23 @@ begin
   { Corners: in a band AND within CSD_CORNER_REACH of the corner along either
     edge — gives a generous diagonal-resize target without thickening the band. }
   if (leftB and (sy < CSD_CORNER_REACH)) or (topB and (sx < CSD_CORNER_REACH)) then
-    Result := WL_SHELL_SURFACE_RESIZE_TOP_LEFT
+    Result := TXdgToplevel.TResizeEdge.reTopleft
   else if (rightB and (sy < CSD_CORNER_REACH)) or (topB and (sx >= dispW - CSD_CORNER_REACH)) then
-    Result := WL_SHELL_SURFACE_RESIZE_TOP_RIGHT
+    Result := TXdgToplevel.TResizeEdge.reTopright
   else if (leftB and (sy >= dispH - CSD_CORNER_REACH)) or (bottomB and (sx < CSD_CORNER_REACH)) then
-    Result := WL_SHELL_SURFACE_RESIZE_BOTTOM_LEFT
+    Result := TXdgToplevel.TResizeEdge.reBottomleft
   else if (rightB and (sy >= dispH - CSD_CORNER_REACH)) or (bottomB and (sx >= dispW - CSD_CORNER_REACH)) then
-    Result := WL_SHELL_SURFACE_RESIZE_BOTTOM_RIGHT
+    Result := TXdgToplevel.TResizeEdge.reBottomright
   else if leftB then
-    Result := WL_SHELL_SURFACE_RESIZE_LEFT
+    Result := TXdgToplevel.TResizeEdge.reLeft
   else if rightB then
-    Result := WL_SHELL_SURFACE_RESIZE_RIGHT
+    Result := TXdgToplevel.TResizeEdge.reRight
   else if topB then
-    Result := WL_SHELL_SURFACE_RESIZE_TOP
+    Result := TXdgToplevel.TResizeEdge.reTop
   else if bottomB then
-    Result := WL_SHELL_SURFACE_RESIZE_BOTTOM
+    Result := TXdgToplevel.TResizeEdge.reBottom
   else
-    Result := WL_SHELL_SURFACE_RESIZE_NONE;  { titlebar move zone }
+    Result := TXdgToplevel.TResizeEdge.reNone;  { titlebar move zone }
 end;
 
 procedure TfpgWaylandWindow.HandleDecorationMove;
@@ -1733,21 +1733,21 @@ begin
   end;
 
   case DecorationHitTest of
-    WL_SHELL_SURFACE_RESIZE_TOP_LEFT:
+    TXdgToplevel.TResizeEdge.reTopleft:
       lDisplay.SetCursor(['top_left_corner', 'nw-resize', 'top_left_arrow']);
-    WL_SHELL_SURFACE_RESIZE_TOP_RIGHT:
+    TXdgToplevel.TResizeEdge.reTopright:
       lDisplay.SetCursor(['top_right_corner', 'ne-resize', 'top_right_arrow']);
-    WL_SHELL_SURFACE_RESIZE_BOTTOM_LEFT:
+    TXdgToplevel.TResizeEdge.reBottomleft:
       lDisplay.SetCursor(['bottom_left_corner', 'sw-resize', 'bottom_left_arrow']);
-    WL_SHELL_SURFACE_RESIZE_BOTTOM_RIGHT:
+    TXdgToplevel.TResizeEdge.reBottomright:
       lDisplay.SetCursor(['bottom_right_corner', 'se-resize', 'bottom_right_arrow']);
-    WL_SHELL_SURFACE_RESIZE_LEFT:
+    TXdgToplevel.TResizeEdge.reLeft:
       lDisplay.SetCursor(['left_side', 'w-resize', 'left_arrow']);
-    WL_SHELL_SURFACE_RESIZE_RIGHT:
+    TXdgToplevel.TResizeEdge.reRight:
       lDisplay.SetCursor(['right_side', 'e-resize', 'right_arrow']);
-    WL_SHELL_SURFACE_RESIZE_TOP:
+    TXdgToplevel.TResizeEdge.reTop:
       lDisplay.SetCursor(['top_side', 'n-resize', 'sb_up_arrow']);
-    WL_SHELL_SURFACE_RESIZE_BOTTOM:
+    TXdgToplevel.TResizeEdge.reBottom:
       lDisplay.SetCursor(['bottom_side', 's-resize', 'sb_down_arrow']);
   else
     lDisplay.SetCursor(['left_ptr', 'arrow']);
@@ -1795,7 +1795,7 @@ begin
 
   { Constraints are double-buffered surface state; commit so they take effect. }
   FWinHandle.SurfaceShell.Surface.Commit;
-  FWinHandle.Display.Display.Flush;
+  FWinHandle.Display.Flush;
 end;
 
 constructor TfpgWaylandWindow.Create(AOwner: TComponent);
@@ -1884,6 +1884,20 @@ begin
     TfpgTimer(Sender).Enabled := False;
 end;
 
+{ True if ACh is a real typed character (not a C0/DEL control byte). xkb's
+  keysym->UTF-8 returns the literal control byte for keys like Backspace (#8),
+  Tab (#9), Enter (#13) and Escape (#27); those are handled via the keycode
+  (FPGM_KEYPRESS), so they must not be emitted as FPGM_KEYCHAR — doing so
+  inserts a .notdef box glyph into text widgets. (X11 doesn't hit this because
+  its XIM Xutf8LookupString returns an empty string for control keys.) }
+function IsTypedKeyChar(const ACh: UTF8String): Boolean;
+begin
+  { Empty, or a leading C0/DEL control byte (Backspace #8, Tab #9, Enter #13,
+    Escape #27, …) => not typed text. Checking the first byte (not the whole
+    length) also rejects a stray trailing NUL the keysym->UTF-8 path could leave. }
+  Result := (Length(ACh) >= 1) and (ACh[1] >= #32) and (ACh[1] <> #127);
+end;
+
 procedure TfpgWaylandApplication.KeyboardRepeatKeyTimer(Sender: TObject);
 var
   msgp: TfpgMessageParams;
@@ -1899,7 +1913,7 @@ begin
        or (ssAlt in msgp.keyboard.shiftstate)) then
   begin
     lKeyChar := FKeyboard.KeySymToUtf8(TKeyboardTimer(Sender).KeyCode);
-    if lKeyChar <> '' then
+    if IsTypedKeyChar(lKeyChar) then
     begin
       msgp.keyboard.keychar := lKeyChar;
       fpgPostMessage(nil, FKeyRepeatWin, FPGM_KEYCHAR, msgp);
@@ -1910,7 +1924,7 @@ begin
 end;
 
 procedure TfpgWaylandApplication.SendKeyboardEnterMessage(Sender: TObject;
-  AKeys: Pwl_array);
+  AKeys: TBytes);
 begin
   if not Assigned(FKeyTimer) then
   begin
@@ -1926,8 +1940,8 @@ begin
   fpgPostMessage(nil, Sender, FPGM_ACTIVATE);
 end;
 
-procedure TfpgWaylandApplication.SendKeyboardKey(Sender: TObject; ATime, AKey,
-  AState: LongWord);
+procedure TfpgWaylandApplication.SendKeyboardKey(Sender: TObject; ATime, AKey: LongWord;
+  AState: TWlKeyboard.TKeyState);
 var
   msg: DWord;
   msgp: TfpgMessageParams;
@@ -1942,7 +1956,7 @@ begin
   lKeySym := lKeySyms[0];
 
   case AState of
-    WL_KEYBOARD_KEY_STATE_PRESSED:
+    TWlKeyboard.TKeyState.kePressed:
       begin
         msg := FPGM_KEYPRESS;
         case FKeyboard.Feed(AKey) of
@@ -1958,7 +1972,7 @@ begin
           end;
         end;
       end;
-    WL_KEYBOARD_KEY_STATE_RELEASED:
+    TWlKeyboard.TKeyState.keReleased:
       begin
         TfpgTimer(FKeyTimer).Enabled:=False;
         msg := FPGM_KEYRELEASE;
@@ -1989,7 +2003,8 @@ begin
       for i := 1 to UTF8Length(lChars) do
       begin
         msgp.keyboard.keychar := UTF8Copy(lChars, i, 1);
-        fpgPostMessage(nil, Sender, FPGM_KEYCHAR, msgp);
+        if IsTypedKeyChar(msgp.keyboard.keychar) then
+          fpgPostMessage(nil, Sender, FPGM_KEYCHAR, msgp);
       end;
     end;
   end;
@@ -2007,7 +2022,7 @@ begin
 end;
 
 procedure TfpgWaylandApplication.SendMouseAxisMessage(Sender: TObject;
-  ATime: LongWord; AAxis: LongWord; AValue: LongInt);
+  ATime: LongWord; AAxis: TWlPointer.TAxis; AValue: LongInt);
 var
   msgp: TfpgMessageParams;
   msg: Integer;
@@ -2016,8 +2031,8 @@ var
 begin
   //WriteLn('Axis: ', AAxis, ' value ', AValue);
   case AAxis of
-    WL_POINTER_AXIS_VERTICAL_SCROLL: msg:=FPGM_SCROLL;
-    WL_POINTER_AXIS_HORIZONTAL_SCROLL: msg:=FPGM_HSCROLL;
+    TWlPointer.TAxis.axVerticalscroll: msg:=FPGM_SCROLL;
+    TWlPointer.TAxis.axHorizontalscroll: msg:=FPGM_HSCROLL;
   else
     Exit;
   end;
@@ -2026,7 +2041,16 @@ begin
   msgp.mouse.x          := lWin.FMousePos.X;
   msgp.mouse.y          := lWin.FMousePos.Y;
   msgp.mouse.Buttons    := 0;//
-  msgp.mouse.delta    := AValue shr 8;//
+  { AValue is the axis amount as wl_fixed (24.8 fixed point); one mouse-wheel
+    notch is the conventional 10.0 (= 2560 in fixed). fpGUI's mouse.delta is a
+    signed notch count (X11 posts +/-1 per notch), so scale by a notch and round.
+    Do it in floating point: a plain 'shr 8' both over-scrolled by 10x AND, being
+    a logical shift, turned the negative (scroll-up) value into a huge positive
+    one — hence "down too fast, up pinned to the top". Guarantee at least one
+    line of movement so sub-notch (high-res) ticks still scroll. }
+  msgp.mouse.delta := Round(AValue / 2560.0);
+  if (msgp.mouse.delta = 0) and (AValue <> 0) then
+    if AValue > 0 then msgp.mouse.delta := 1 else msgp.mouse.delta := -1;
   msgp.mouse.shiftstate := FShiftState;
 
   fpgPostMessage(nil, Sender, msg, msgp);
@@ -2034,7 +2058,7 @@ begin
 
 end;
 
-procedure TfpgWaylandApplication.SendMouseButtonMessage(Sender: TObject; ATime: LongWord; AButton: LongWord; AState: LongInt);
+procedure TfpgWaylandApplication.SendMouseButtonMessage(Sender: TObject; ATime: LongWord; AButton: LongWord; AState: TWlPointer.TButtonState);
 var
   lWin: TfpgWaylandWindow absolute Sender;
   lButton, lMsg: Integer;
@@ -2045,7 +2069,7 @@ begin
     on a release. A dropdown/menu opened on mouse-down would otherwise be closed
     by the matching mouse-up landing on the parent window. (We have no popup
     grab on this compositor, so fpGUI's popup stack is the dismissal mechanism.) }
-  if (AState = WL_POINTER_BUTTON_STATE_PRESSED) and not WindowInPopupStack(lWin) then
+  if (AState = TWlPointer.TButtonState.buPressed) and not WindowInPopupStack(lWin) then
     ClosePopups;
   // update mouse state
   case AButton of
@@ -2071,12 +2095,12 @@ begin
     exit;
 
   case AState of
-    WL_POINTER_BUTTON_STATE_PRESSED :
+    TWlPointer.TButtonState.buPressed :
       begin
         Include(FShiftState, lEnum);
         lMsg:= FPGM_MOUSEDOWN;
       end;
-    WL_POINTER_BUTTON_STATE_RELEASED:
+    TWlPointer.TButtonState.buReleased:
       begin
         Exclude(FShiftState, lEnum);
         lMsg:= FPGM_MOUSEUP;
@@ -2216,16 +2240,16 @@ begin
 end;
 
 procedure TfpgWaylandApplication.SetupKeymap(Sender: TObject;
-  AFormat: LongWord; AFileDesc: LongInt; ASize: LongInt);
+  AFormat: TWlKeyboard.TKeymapFormat; AFileDesc: LongInt; ASize: LongInt);
 begin
   case AFormat of
-    WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP: { dunno };
-    WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1:
+    TWlKeyboard.TKeymapFormat.keNokeymap: { dunno };
+    TWlKeyboard.TKeymapFormat.keXkbv1:
       begin
         FKeyboard := TxkbHelper.create(AFileDesc, ASize);
       end;
     else
-      raise EfpGUIException.CreateFmt('fpGui/Wayland: Unexpected keymap format "%d"', [AFormat]);
+      raise EfpGUIException.CreateFmt('fpGui/Wayland: Unexpected keymap format "%d"', [Ord(AFormat)]);
   end;
 
 
