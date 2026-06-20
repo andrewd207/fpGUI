@@ -9,13 +9,15 @@
 
     <unitPaths>
       <!-- These act as inclusion rules based on conditions.
-           On Linux/BSD the X11 and Wayland backends are mutually exclusive
-           (both provide fpg_interface/fpg_impl), and PasBuild conditions have
-           no negation, so the backend is chosen by profile:
-             -p x11      (default Linux/BSD backend)
-             -p wayland  (Wayland backend)
+           X11 is the DEFAULT backend on UNIX (Linux/BSD) and is always compiled
+           with no profile required. It provides the single fpg_interface/fpg_impl
+           and registers the X11 backend factory (fpg_x11_backend).
+           Building with -p wayland additionally compiles the Wayland units and
+           (via fpg_x11_backend's {$ifdef WAYLAND} uses + the -dWAYLAND define
+           the profile sets) registers the Wayland factory as a second backend.
+           The active backend is then chosen at RUNTIME (see fpg_backend).
            Windows/macOS select their backend by platform automatically. -->
-      <path condition="X11">corelib/x11</path>
+      <path condition="UNIX">corelib/x11</path>
       <path condition="WAYLAND">corelib/wayland</path>
       <path condition="WINDOWS">corelib/gdi</path>
       <path condition="DARWIN">corelib/cocoa</path>
@@ -46,10 +48,14 @@
     </profile>
     <profile>
       <id>wayland</id>
+      <!-- WAYLAND (PasBuild condition) pulls in the corelib/wayland unit path. -->
       <defines>
         <define>WAYLAND</define>
       </defines>
       <compilerOptions>
+        <!-- -dWAYLAND is the ACTUAL FPC define, so fpg_x11_backend's
+             {$ifdef WAYLAND} pulls in the Wayland registrar. -->
+        <option>-dWAYLAND</option>
         <option>-g</option>
         <option>-gl</option>
         <option>-gw3</option>

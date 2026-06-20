@@ -48,12 +48,19 @@ type
 
 implementation
 
-{$ifdef AGGCanvas}
 uses
-  fpg_hybrid_canvas,
-  fpg_fontmanager,
-  fpg_freetype_agg_fontresource;
+  { Always link the X11 backend registrar so the X11 factory is registered.
+    fpg_x11_backend itself conditionally ({$ifdef WAYLAND}) pulls in the Wayland
+    registrar, making Wayland an additive second backend under -p wayland. }
+  fpg_x11_backend
+  {$ifdef AGGCanvas}
+  , fpg_hybrid_canvas
+  , fpg_fontmanager
+  , fpg_freetype_agg_fontresource
+  {$endif}
+  ;
 
+{$ifdef AGGCanvas}
 initialization
   CreateBufferManager  := @CreateX11BufferManager;
   AggFontResourceClass := TfpgFreeTypeFontResource;
