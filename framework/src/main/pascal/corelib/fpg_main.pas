@@ -27,6 +27,7 @@ uses
   SysUtils,
   fpg_constants,
   fpg_base,
+  fpg_backend,
   fpg_interface,
   fpg_impl,
   fpg_fontmanager;
@@ -1404,7 +1405,21 @@ end;
 function fpgApplication: TfpgApplication;
 begin
   if not Assigned(uApplication) then
+  begin
+    { Resolve the platform backend once, before any window is constructed, so
+      that fpgBackend is live for the factory-based creation paths (see
+      TfpgWidget.DoAllocateWindowHandle). On a single-backend platform this
+      simply selects that backend; on Linux it picks X11 vs Wayland per the
+      session (env / what is actually offered). }
+    if fpgBackend = nil then
+      fpgSelectBackend;
+    if GetEnvironmentVariable('FPGUI_BACKEND_DEBUG') <> '' then
+    begin
+      Writeln(ErrOutput, '[fpGUI] selected backend: ', fpgBackendName);
+      Flush(ErrOutput);
+    end;
     uApplication := TfpgApplication.Create;
+  end;
   result := uApplication;
 end;
 

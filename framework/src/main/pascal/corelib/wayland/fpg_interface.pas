@@ -49,7 +49,10 @@ implementation
 
 uses
   fpg_fontmanager,
-  fpg_wayland_buffer_manager;
+  fpg_wayland_buffer_manager,
+  { Pull the Wayland backend registrar into the link so its initialization runs
+    and registers the factory with fpg_backend (runtime backend selection). }
+  fpg_wayland_backend;
 
 initialization
   CreateBufferManager  := @CreateWaylandBufferManager;

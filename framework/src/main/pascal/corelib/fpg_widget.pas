@@ -25,6 +25,7 @@ uses
   SysUtils,
   fpg_main,
   fpg_base,
+  fpg_backend,
   fpg_layouttypes;
 
 type
@@ -447,7 +448,9 @@ procedure TfpgWidget.DoAllocateWindowHandle;
 begin
   if HasOwnWindow then
   begin
-    FWindow := TfpgNativeWindow.Create(Self);
+    { Runtime-selected backend constructs the native window (was the
+      compile-time TfpgNativeWindow = class(TfpgWindowImpl) alias). }
+    FWindow := fpgBackend.CreateWindow(Self);
     Window.WindowType:=wtChild;
     UpdatePosition;
   end
