@@ -51,6 +51,7 @@ begin
   FillChar(info, SizeOf(info), 0);
   info.Kind              := bkWayland;
   info.Name              := 'Wayland';
+  info.Priority          := 1;   { preferred over X11 when a compositor exists }
   info.ApplicationClass  := TfpgWaylandApplication;
   info.WindowClass       := TfpgWaylandWindow;
   info.CanvasClass       := THybridCanvas;

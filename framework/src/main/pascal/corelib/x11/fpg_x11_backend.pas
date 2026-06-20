@@ -64,6 +64,7 @@ begin
   FillChar(info, SizeOf(info), 0);
   info.Kind              := bkX11;
   info.Name              := 'X11';
+  info.Priority          := 0;   { default fallback }
   info.ApplicationClass  := TfpgX11Application;
   info.WindowClass       := TfpgX11Window;
   info.CanvasClass       := TfpgX11Canvas;

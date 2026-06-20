@@ -287,7 +287,7 @@ type
     procedure UpdateKeyState(Sender: TObject; AModsDepressed, AModsLatched, AModsLocked, AGroup: LongWord);
     procedure StartRepeatDelay(AKeyCode: LongWord);
   protected
-    procedure   DoFlush;
+    procedure   DoFlush; override;
     function    DoGetFontFaceList: TStringList; override;
     procedure   DoWaitWindowMessage(atimeoutms: integer); override;
     function    MessagesPending: boolean; override;
@@ -298,7 +298,7 @@ type
       TWaylandBufferManager (typed as TObject to avoid a unit cycle). }
     procedure   FlushPendingPresents;
   public
-    constructor Create(const AParams: string = ''); virtual;
+    constructor Create(const AParams: string = ''); override;
     destructor  Destroy; override;
     procedure   QueuePresent(ABufferManager: TObject);
     procedure   UnqueuePresent(ABufferManager: TObject);

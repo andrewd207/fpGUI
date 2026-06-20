@@ -135,10 +135,24 @@ type
   end;
 
 
-  TfpgImage = class(TfpgImageImpl)
+  { Runtime-backend image shell. Like TfpgApplication, this no longer descends
+    from a compile-time backend (TfpgImageImpl); it holds the pixel data itself
+    (in TfpgImageBase) and COMPOSES the runtime-selected backend image
+    (FPlatform), forwarding the platform Do* operations to it. The software
+    (hybrid) canvas draws from this shell's ImageData, so it works on any
+    backend; FPlatform builds the backend-native handle (e.g. an X11 XImage)
+    used by a native canvas. }
+  TfpgImage = class(TfpgImageBase)
   private
+    FPlatform: TfpgImageBase;   { the runtime-selected backend image }
     function    GetScanLine(Row: Integer): Pointer;
+  protected
+    procedure   DoFreeImage; override;
+    procedure   DoInitImage(acolordepth, awidth, aheight: integer; aimgdata: Pointer); override;
+    procedure   DoInitImageMask(awidth, aheight: integer; aimgdata: Pointer); override;
   public
+    constructor Create; override;
+    destructor  Destroy; override;
     function    CreateDisabledImage: TfpgImage;
     function    ImageFromSource: TfpgImage;
     function    ImageFromRect(var ARect: TRect): TfpgImage; overload;
@@ -295,8 +309,17 @@ type
   end;
 
 
-  TfpgApplication = class(TfpgApplicationImpl)
+  { Runtime-backend application.
+
+    This is the cross-platform application singleton (hint windows, the message
+    loop, the font manager, ...). It no longer descends from a compile-time
+    backend (TfpgApplicationImpl) — instead it COMPOSES the runtime-selected
+    backend application (FPlatform, created from fpgBackend^.ApplicationClass)
+    and forwards the platform operations to it. That is what lets one binary run
+    on either X11 or Wayland, chosen at startup. }
+  TfpgApplication = class(TfpgApplicationBase)
   private
+    FPlatform: TfpgApplicationBase;   { the runtime-selected backend app }
     FHintPause: Integer;
     FShowHint: boolean;
     FOnException: TExceptionEvent;
@@ -322,6 +345,19 @@ type
     FDesktop: TfpgDesktop;
     FFontManager: TfpgFontManager;  // centralized font management
     FMessageHookList: TFPList;
+    { Platform operations forwarded to the composed backend app (FPlatform). }
+    function    DoGetFontFaceList: TStringList; override;
+    procedure   DoWaitWindowMessage(atimeoutms: integer); override;
+    function    MessagesPending: boolean; override;
+    procedure   DoFlush; override;
+    function    GetMonitorCount: Integer; override;
+    function    GetMonitorInfo(AIndex: Integer): TfpgScreenInfo; override;
+    function    GetScreenWidth: TfpgCoord; override;
+    function    GetScreenHeight: TfpgCoord; override;
+    function    GetScreenPixelColor(APos: TPoint): TfpgColor; override;
+    function    Screen_dpi_x: integer; override;
+    function    Screen_dpi_y: integer; override;
+    function    Screen_dpi: integer; override;
     procedure   InternalInit;
     procedure   RunMessageLoop;
     procedure   WaitWindowMessage(atimeoutms: integer);
@@ -1604,6 +1640,67 @@ begin
 end;
 
 
+{ Platform forwarders — delegate to the runtime-selected backend app. }
+function TfpgApplication.DoGetFontFaceList: TStringList;
+begin
+  Result := FPlatform.DoGetFontFaceList;
+end;
+
+procedure TfpgApplication.DoWaitWindowMessage(atimeoutms: integer);
+begin
+  FPlatform.DoWaitWindowMessage(atimeoutms);
+end;
+
+function TfpgApplication.MessagesPending: boolean;
+begin
+  Result := FPlatform.MessagesPending;
+end;
+
+procedure TfpgApplication.DoFlush;
+begin
+  FPlatform.DoFlush;
+end;
+
+function TfpgApplication.GetMonitorCount: Integer;
+begin
+  Result := FPlatform.GetMonitorCount;
+end;
+
+function TfpgApplication.GetMonitorInfo(AIndex: Integer): TfpgScreenInfo;
+begin
+  Result := FPlatform.GetMonitorInfo(AIndex);
+end;
+
+function TfpgApplication.GetScreenWidth: TfpgCoord;
+begin
+  Result := FPlatform.GetScreenWidth;
+end;
+
+function TfpgApplication.GetScreenHeight: TfpgCoord;
+begin
+  Result := FPlatform.GetScreenHeight;
+end;
+
+function TfpgApplication.GetScreenPixelColor(APos: TPoint): TfpgColor;
+begin
+  Result := FPlatform.GetScreenPixelColor(APos);
+end;
+
+function TfpgApplication.Screen_dpi_x: integer;
+begin
+  Result := FPlatform.Screen_dpi_x;
+end;
+
+function TfpgApplication.Screen_dpi_y: integer;
+begin
+  Result := FPlatform.Screen_dpi_y;
+end;
+
+function TfpgApplication.Screen_dpi: integer;
+begin
+  Result := FPlatform.Screen_dpi;
+end;
+
 constructor TfpgApplication.Create(const AParams: string);
 var
   i: Integer;
@@ -1626,6 +1723,10 @@ begin
 
   try
     inherited Create(AParams);
+    { Construct the runtime-selected backend application and adopt its
+      initialized state (the backend connects to the display in its ctor). }
+    FPlatform := fpgBackend^.ApplicationClass.Create(AParams);
+    FIsInitialized := FPlatform.IsInitialized;
     if IsInitialized then
     begin
       { Populate desktop topology from platform backend }
@@ -1697,6 +1798,9 @@ begin
     uMsgQueueList.Delete(i);
   end;
   uMsgQueueList.Free;
+
+  { Tear down the backend app last (it owns the display connection). }
+  FreeAndNil(FPlatform);
 
   inherited Destroy;
 end;
@@ -3305,6 +3409,40 @@ end;
 
 
 { TfpgImage }
+
+constructor TfpgImage.Create;
+begin
+  inherited Create;
+  { Compose the runtime-selected backend image. May be nil if no backend has
+    been selected yet (images created before fpgApplication) — the shell still
+    holds the pixel data, and the software canvas draws from that. }
+  if fpgBackend <> nil then
+    FPlatform := fpgBackend^.ImageClass.Create;
+end;
+
+destructor TfpgImage.Destroy;
+begin
+  FreeAndNil(FPlatform);
+  inherited Destroy;
+end;
+
+procedure TfpgImage.DoFreeImage;
+begin
+  if Assigned(FPlatform) then
+    FPlatform.DoFreeImage;
+end;
+
+procedure TfpgImage.DoInitImage(acolordepth, awidth, aheight: integer; aimgdata: Pointer);
+begin
+  if Assigned(FPlatform) then
+    FPlatform.DoInitImage(acolordepth, awidth, aheight, aimgdata);
+end;
+
+procedure TfpgImage.DoInitImageMask(awidth, aheight: integer; aimgdata: Pointer);
+begin
+  if Assigned(FPlatform) then
+    FPlatform.DoInitImageMask(awidth, aheight, aimgdata);
+end;
 
 function TfpgImage.GetScanLine(Row: Integer): Pointer;
 var

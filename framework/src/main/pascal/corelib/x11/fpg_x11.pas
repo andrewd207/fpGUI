@@ -170,7 +170,7 @@ type
     procedure   DoInitImage(acolordepth, awidth, aheight: integer; aimgdata: Pointer); override;
     procedure   DoInitImageMask(awidth, aheight: integer; aimgdata: Pointer); override;
   public
-    constructor Create;
+    constructor Create; override;
   end;
 
 
@@ -525,7 +525,9 @@ uses
   dynlibs;
 
 var
-  xapplication: TfpgApplication;
+  { the X11 backend application instance (the composed FPlatform of
+    fpgApplication when X11 is the selected backend). }
+  xapplication: TfpgX11Application;
 
 { XRandR 1.5 structs — not in FPC's xrandr.pp which only covers v1.1 }
 type
@@ -1776,7 +1778,7 @@ begin
   if InputContext = nil then
     Exit;
   FIsInitialized := True;
-  xapplication := TfpgApplication(self);
+  xapplication := Self;
 
   // Create and open the wake channel (self-pipe) so worker threads
   // can wake the event loop via WakeMainThread
@@ -2852,7 +2854,7 @@ begin
     WMHints := XAllocWMHints;
 
     { setup a window icon - old style }
-    if not fpgApplication.netlayer.ManagerSupportsAtom(naWM_ICON) then
+    if not xapplication.netlayer.ManagerSupportsAtom(naWM_ICON) then
     begin
       IconPixMap := XCreateBitmapFromData(xapplication.display, FWinHandle,
         @IconBitmapBits, IconBitmapWidth, IconBitmapHeight);
@@ -2886,18 +2888,18 @@ begin
     end;
 
     { so newish window manager can close unresponsive programs }
-    fpgApplication.netlayer.WindowSetPID(FWinHandle, GetProcessID);
-    fpgApplication.netlayer.WindowSetSupportPING(FWinHandle);
+    xapplication.netlayer.WindowSetPID(FWinHandle, GetProcessID);
+    xapplication.netlayer.WindowSetSupportPING(FWinHandle);
 
     // set stored opacity value
-    fpgApplication.netlayer.WindowSetAlpha(FWinHandle, WindowOpacity);
+    xapplication.netlayer.WindowSetAlpha(FWinHandle, WindowOpacity);
 
     // use this to synchronize painting the window with the window frame being redrawn
     FSyncCounter:=XSyncCreateCounter(xapplication.Display, FSyncValue);
     if FSyncCounter > 0 then
     begin
-      fpgApplication.netlayer.WindowSetSupportSyncRequest(FWinHandle);
-      fpgApplication.netlayer.WindowSetPropertyCardinal(FWinHandle, fpgApplication.netlayer.NetAtom[naWM_SYNC_REQUEST_COUNTER], 1, FSyncCounter);
+      xapplication.netlayer.WindowSetSupportSyncRequest(FWinHandle);
+      xapplication.netlayer.WindowSetPropertyCardinal(FWinHandle, xapplication.netlayer.NetAtom[naWM_SYNC_REQUEST_COUNTER], 1, FSyncCounter);
     end;
 
     XFree(WMHints);
@@ -2909,7 +2911,7 @@ begin
 
   if FWindowType <> wtChild then
     // send close event instead of quiting the whole application...
-    fpgApplication.netlayer.WindowAddProtocol(FWinHandle, xapplication.xia_wm_delete_window);
+    xapplication.netlayer.WindowAddProtocol(FWinHandle, xapplication.xia_wm_delete_window);
 
   // for modal windows, this is necessary
   if FWindowType = wtModalForm then
@@ -2934,7 +2936,7 @@ begin
       if lmwh <> 0 then
       begin
         XSetTransientForHint(xapplication.display, FWinHandle, lmwh);
-        fpgApplication.netlayer.WindowSetModal(FWinHandle, True);
+        xapplication.netlayer.WindowSetModal(FWinHandle, True);
       end;
     end;
   end;
@@ -2994,7 +2996,7 @@ begin
     Include(FWinFlags, xwsfMapped);
     // Fullscreen can only be set on visible (already mapped) windows.
     if waFullScreen in FWindowAttributes then
-      fpgApplication.netlayer.WindowSetFullscreen(FWinHandle, True);
+      xapplication.netlayer.WindowSetFullscreen(FWinHandle, True);
   end
   else
   begin
@@ -3058,12 +3060,12 @@ begin
       hints.min_width  := widget.MinWidth;
       hints.min_height := widget.MinHeight;
       { Only set max size hints if widget has explicit size constraints }
-      if (widget.MaxWidth > 0) and (widget.MaxWidth < xapplication.ScreenWidth) then
+      if (widget.MaxWidth > 0) and (widget.MaxWidth < fpgApplication.ScreenWidth) then
       begin
         hints.flags      := hints.flags or PMaxSize;
         hints.max_width  := widget.MaxWidth;
       end;
-      if (widget.MaxHeight > 0) and (widget.MaxHeight < xapplication.ScreenHeight) then
+      if (widget.MaxHeight > 0) and (widget.MaxHeight < fpgApplication.ScreenHeight) then
       begin
         hints.flags      := hints.flags or PMaxSize;
         hints.max_height := widget.MaxHeight;
@@ -3232,7 +3234,7 @@ begin
   inherited SetWindowOpacity(AValue);
 
   if FWinHandle <> 0 then
-     fpgApplication.netlayer.WindowSetAlpha(FWinHandle,AValue);
+     xapplication.netlayer.WindowSetAlpha(FWinHandle,AValue);
 end;
 
 procedure TfpgX11Window.DoSetWindowAttributes(const AOldAtributes, ANewAttributes: TWindowAttributes; const AForceAll: Boolean);
@@ -3282,12 +3284,12 @@ begin
       hints.min_width  := w.MinWidth;
       hints.min_height := w.MinHeight;
       { Only set max size hints if widget has explicit size constraints }
-      if (w.MaxWidth > 0) and (w.MaxWidth < xapplication.ScreenWidth) then
+      if (w.MaxWidth > 0) and (w.MaxWidth < fpgApplication.ScreenWidth) then
       begin
         hints.flags      := hints.flags or PMaxSize;
         hints.max_width  := w.MaxWidth;
       end;
-      if (w.MaxHeight > 0) and (w.MaxHeight < xapplication.ScreenHeight) then
+      if (w.MaxHeight > 0) and (w.MaxHeight < fpgApplication.ScreenHeight) then
       begin
         hints.flags      := hints.flags or PMaxSize;
         hints.max_height := w.MaxHeight;
@@ -3310,17 +3312,17 @@ begin
   if (FWindowType = wtPopup) and (waStayOnTop in Changed) then
   begin
     if (waStayOnTop in ANewAttributes) then // we have a Splash screen
-      fpgApplication.netlayer.WindowSetType(FWinHandle, [nwtSplash])
+      xapplication.netlayer.WindowSetType(FWinHandle, [nwtSplash])
     else
-      fpgApplication.netlayer.WindowSetType(FWinHandle, [nwtPopupMenu]);
+      xapplication.netlayer.WindowSetType(FWinHandle, [nwtPopupMenu]);
   end;
 
   // waSystemStayOnTop
   if (waSystemStayOnTop in Changed) and (FWindowType in [wtWindow, wtModalForm]) then
     if (waSystemStayOnTop in ANewAttributes) and (waSystemStayOnTop in Changed) then
-      fpgApplication.netlayer.WindowSetAbove(FWinHandle, True)
+      xapplication.netlayer.WindowSetAbove(FWinHandle, True)
     else
-      fpgApplication.netlayer.WindowSetAbove(FWinHandle, False);
+      xapplication.netlayer.WindowSetAbove(FWinHandle, False);
 
   // waBorderless
   // process Borderless forms
@@ -3415,7 +3417,7 @@ var
 begin
   if FWinHandle <= 0 then
     Exit;
-  fpgApplication.netlayer.WindowSetName(FWinHandle, PChar(ATitle));
+  xapplication.netlayer.WindowSetName(FWinHandle, PChar(ATitle));
 
   // Required for titles to work in IceWM. The above netlayer doesn't do the trick.
   tp.value    := PCUChar(ATitle);
@@ -3468,7 +3470,7 @@ end;
 procedure TfpgX11Window.SetFullscreen(AValue: Boolean);
 begin
   inherited SetFullscreen(AValue);
-  fpgApplication.netlayer.WindowSetFullscreen(FWinHandle, AValue);
+  xapplication.netlayer.WindowSetFullscreen(FWinHandle, AValue);
 end;
 
 procedure TfpgX11Window.BringToFront;
@@ -4120,7 +4122,7 @@ begin
     XFreeGc(xapplication.display, gc2);
   end
   else
-    XPutImage(xapplication.display, DrawHandle, Fgc, TfpgImage(img).XImage, xi, yi, x+FDeltaX, y+FDeltaY, w, h);
+    XPutImage(xapplication.display, DrawHandle, Fgc, TfpgX11Image(img).XImage, xi, yi, x+FDeltaX, y+FDeltaY, w, h);
 end;
 
 { TfpgX11Image }
@@ -4167,7 +4169,7 @@ begin
 
       // only truecolor 24/32 displays supported now, otherwise color conversion required!
       // this must be match for the display !!!
-      depth          := fpgApplication.DisplayDepth;
+      depth          := xapplication.DisplayDepth;
       bits_per_pixel := 32;
 
       // Shouldn't we rather get this from XDefaultVisualOfScreen(). PVisual?
@@ -4763,7 +4765,7 @@ begin
   end;
 
   While not FFinished do
-     TApplicationHelper(xApplication).WaitWindowMessage(200);
+     TApplicationHelper(fpgApplication).WaitWindowMessage(200);
 
   Result := FResult;
 end;

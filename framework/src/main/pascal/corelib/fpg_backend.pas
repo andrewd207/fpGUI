@@ -76,6 +76,11 @@ type
   TfpgBackendInfo = record
     Kind:              TfpgBackendKind;
     Name:              string;
+    { Auto-selection preference: when no explicit override is given, the
+      registered backend with the HIGHEST Priority that IsAvailable is chosen.
+      Convention: X11 = 0 (default fallback), Wayland = 1 (preferred when a
+      compositor is present). }
+    Priority:          Integer;
     ApplicationClass:  TfpgApplicationCls;
     WindowClass:       TfpgWindowCls;
     CanvasClass:       TfpgCanvasCls;
@@ -180,13 +185,6 @@ begin
   Result := fpgStrToBackendKind(GetEnvironmentVariable('FPGUI_BACKEND'));
 end;
 
-const
-  { Fixed preference order applied during auto selection. Wayland before X11 so
-    that, in a build where both are registered (-p wayland), Wayland is chosen
-    whenever it is actually available. }
-  cBackendPriority: array[0..3] of TfpgBackendKind =
-    (bkWayland, bkX11, bkGDI, bkCocoa);
-
 function fpgSelectBackend(APreferred: TfpgBackendKind): Boolean;
 var
   want: TfpgBackendKind;
@@ -203,20 +201,19 @@ begin
       idx := -1;
   end;
 
-  { 2. else the first available backend in the fixed priority order. }
+  { 2. else the highest-Priority registered backend that is available. }
   if idx < 0 then
-    for i := Low(cBackendPriority) to High(cBackendPriority) do
-    begin
-      idx := FindRegistered(cBackendPriority[i]);
-      if BackendUsable(idx) then
-        Break;
-      idx := -1;
-    end;
+    for i := 0 to High(uRegistered) do
+      if BackendUsable(i)
+      and ((idx < 0) or (uRegistered[i].Priority > uRegistered[idx].Priority)) then
+        idx := i;
 
-  { 3. last resort: any registered backend (even if it claims unavailable) so we
-       have something rather than nil. }
-  if (idx < 0) and (Length(uRegistered) > 0) then
-    idx := 0;
+  { 3. last resort: highest-Priority registered backend (even if it claims to be
+       unavailable) so we have something rather than nil. }
+  if idx < 0 then
+    for i := 0 to High(uRegistered) do
+      if (idx < 0) or (uRegistered[i].Priority > uRegistered[idx].Priority) then
+        idx := i;
 
   Result := idx >= 0;
   if Result then

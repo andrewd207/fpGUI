@@ -277,11 +277,14 @@ type
     FMaskData: pointer;
     FMaskDataSize: integer;
     FMaskPoint: TPoint;
+  public
+    { Public (rather than protected) so the runtime-backend shell TfpgImage can
+      forward these to its composed FPlatform backend-image (a sibling class). }
     procedure   DoFreeImage; virtual; abstract;
     procedure   DoInitImage(acolordepth, awidth, aheight: integer; aimgdata: Pointer); virtual; abstract;
     procedure   DoInitImageMask(awidth, aheight: integer; aimgdata: Pointer); virtual; abstract;
   public
-    constructor Create;
+    constructor Create; virtual;
     destructor  Destroy; override;
     procedure   Invert(IncludeMask: Boolean = False);
     procedure   FreeImage;
@@ -820,10 +823,14 @@ type
     FIsInitialized: Boolean;
     FModalFormStack: TList;
     FSelection: TfpgClipboardBase;
+    function    GetHelpViewer: TfpgString; virtual;
+  public
+    { Platform operations. Public (rather than protected) so the runtime-backend
+      composition wrapper TfpgApplication can forward them to its FPlatform
+      backend-app instance, which is a sibling class (both descend from this). }
     function    DoGetFontFaceList: TStringList; virtual; abstract;
     procedure   DoWaitWindowMessage(atimeoutms: integer); virtual; abstract;
     function    MessagesPending: boolean; virtual; abstract;
-    function    GetHelpViewer: TfpgString; virtual;
     procedure   DoFlush; virtual; abstract;
     function    GetMonitorCount: Integer; virtual; abstract;
     function    GetMonitorInfo(AIndex: Integer): TfpgScreenInfo; virtual; abstract;

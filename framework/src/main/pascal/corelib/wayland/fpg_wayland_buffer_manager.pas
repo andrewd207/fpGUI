@@ -107,7 +107,7 @@ destructor TWaylandBufferManager.Destroy;
 begin
   { Don't leave a dangling pointer in the app's pending-present list. }
   if Assigned(fpgApplication) then
-    TfpgWaylandApplication(fpgApplication).UnqueuePresent(Self);
+    WApplication.UnqueuePresent(Self);
   FreeBuffer;
   inherited Destroy;
 end;
@@ -130,7 +130,7 @@ begin
   FWin := nil;
   FWindow := nil;
   if Assigned(fpgApplication) then
-    TfpgWaylandApplication(fpgApplication).UnqueuePresent(Self);
+    WApplication.UnqueuePresent(Self);
 end;
 
 procedure TWaylandBufferManager.AllocateBuffer(AWidth, AHeight: Integer;
@@ -233,7 +233,7 @@ begin
   if (w < 1) or (h < 1) then
     Exit;
   AccumulateDamage(x, y, w, h);
-  TfpgWaylandApplication(fpgApplication).QueuePresent(Self);
+  WApplication.QueuePresent(Self);
 end;
 
 procedure TWaylandBufferManager.Present(ABufIdx: Integer; x, y, w, h: TfpgCoord);
