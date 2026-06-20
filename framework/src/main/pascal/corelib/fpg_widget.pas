@@ -450,7 +450,7 @@ begin
   begin
     { Runtime-selected backend constructs the native window (was the
       compile-time TfpgNativeWindow = class(TfpgWindowImpl) alias). }
-    FWindow := fpgBackend.CreateWindow(Self);
+    FWindow := fpgBackend^.WindowClass.Create(Self);
     Window.WindowType:=wtChild;
     UpdatePosition;
   end
