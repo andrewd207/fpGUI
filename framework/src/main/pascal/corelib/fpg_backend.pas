@@ -111,6 +111,21 @@ function  fpgBackend: PfpgBackendInfo;
 { Convenience: the active backend's display name, or '<none>'. }
 function  fpgBackendName: string;
 
+{ True if this binary was built with a real thread driver (i.e. cthreads is in
+  the program's uses clause on Unix). Backends that need threads — Wayland —
+  call this from their IsAvailable so that, on a binary without thread support,
+  auto-selection skips them and falls back to a single-threaded backend (X11)
+  instead of crashing the first time a thread is started.
+
+  There is no public RTL flag for "a real thread manager is installed", and the
+  obvious probe (start a thread, catch the failure) does NOT work: the default
+  no-threads manager calls RunError(232), a hard halt that try/except cannot
+  catch. Instead we probe RTLEventCreate, which the no-threads manager answers
+  with nil (no error, as long as no thread has started yet) while a real manager
+  returns a live event. The result is computed once and cached, and the probe
+  leaves System.IsMultiThread untouched. }
+function  fpgThreadingAvailable: Boolean;
+
 { The explicit user override (APreferred arg, then FPGUI_BACKEND env), or
   bkAuto when none is given. }
 function  fpgPreferredBackend(APreferred: TfpgBackendKind = bkAuto): TfpgBackendKind;
@@ -124,6 +139,28 @@ implementation
 var
   uRegistered: array of TfpgBackendInfo;
   uActiveIdx:  Integer = -1;
+  uThreading:  Integer = -1;   { -1 = not probed yet, 0 = no, 1 = yes }
+
+
+function fpgThreadingAvailable: Boolean;
+var
+  ev: PRTLEvent;
+begin
+  if uThreading < 0 then
+  begin
+    { No-threads manager: nil, no error (nothing has started a thread yet).
+      Real manager (cthreads): a live event we immediately destroy. }
+    ev := RTLEventCreate;
+    if ev <> nil then
+    begin
+      RTLeventdestroy(ev);
+      uThreading := 1;
+    end
+    else
+      uThreading := 0;
+  end;
+  Result := uThreading = 1;
+end;
 
 
 function fpgBackendKindToStr(AKind: TfpgBackendKind): string;

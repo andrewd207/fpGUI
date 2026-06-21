@@ -36,6 +36,26 @@ begin
     WAYLAND_SOCKET fd). Without one there is nothing to connect to. }
   Result := (GetEnvironmentVariable('WAYLAND_DISPLAY') <> '')
          or (GetEnvironmentVariable('WAYLAND_SOCKET') <> '');
+  if not Result then
+    Exit;
+
+  { The Wayland backend relies on threading. A binary built without a thread
+    driver (no cthreads in the program's uses clause) would otherwise pick
+    Wayland here and then crash deep inside the first thread start with an
+    ENoThreadSupport / RunError(232) — a non-obvious failure far from the cause.
+    Report unavailable so auto-selection falls back to X11 (which is
+    single-threaded-safe) instead. }
+  if not fpgThreadingAvailable then
+  begin
+    Result := False;
+    if GetEnvironmentVariable('FPGUI_BACKEND_DEBUG') <> '' then
+    begin
+      Writeln(ErrOutput, '[fpGUI] Wayland compositor present, but this binary '
+        + 'has no thread support compiled in (add cthreads to the program uses '
+        + 'clause); falling back to X11.');
+      Flush(ErrOutput);
+    end;
+  end;
 end;
 
 procedure WaylandInstallHooks;
