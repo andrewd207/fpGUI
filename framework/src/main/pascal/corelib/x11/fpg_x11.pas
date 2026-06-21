@@ -528,6 +528,22 @@ var
   { the X11 backend application instance (the composed FPlatform of
     fpgApplication when X11 is the selected backend). }
   xapplication: TfpgX11Application;
+  { the X11 CLIPBOARD selection object (the composed FPlatform of fpgClipboard
+    when X11 is the selected backend). fpgClipboard now returns a backend-neutral
+    proxy, so the X11 event handlers reach the real object through this global,
+    set from TfpgX11Clipboard.InitClipboard. Use the xclipboard() accessor, which
+    lazily creates it via fpgClipboard if needed. }
+  uxClipboard: TfpgX11Clipboard;
+
+{ Ensure the X11 clipboard object exists and return it. Touching fpgClipboard
+  constructs the proxy, whose backend FPlatform is this TfpgX11Clipboard, which
+  records itself in uxClipboard from InitClipboard. }
+function xclipboard: TfpgX11Clipboard;
+begin
+  if uxClipboard = nil then
+    fpgClipboard;
+  Result := uxClipboard;
+end;
 
 { XRandR 1.5 structs — not in FPC's xrandr.pp which only covers v1.1 }
 type
@@ -794,7 +810,7 @@ begin
   if ev.xselection._property = xapplication.xia_selection then
     clip := TfpgX11Selection(xapplication.selection)
   else
-    clip := fpgClipboard;
+    clip := xclipboard;
   if ev.xselection._property > 0 then
   begin
     XGetWindowProperty(xapplication.Display, ev.xselection.requestor,
@@ -876,7 +892,7 @@ begin
   if e.selection = xapplication.xia_selection then
     clip := TfpgX11Selection(xapplication.selection)
   else
-    clip := fpgClipboard;
+    clip := xclipboard;
 
   if Atom = xapplication.xia_targets then
   begin
@@ -2521,8 +2537,8 @@ begin
           }
           if ev.xselectionclear.selection = xia_clipboard then
           begin
-            fpgClipboard.FClipboardText := '';
-            fpgClipboard.DoLostSelection;
+            xclipboard.FClipboardText := '';
+            xclipboard.DoLostSelection;
             Exit;
           end;
           if ev.xselectionclear.selection = xia_selection then
@@ -4323,6 +4339,8 @@ end;
 destructor TfpgX11Selection.Destroy;
 begin
   SendClipboardToManager;
+  if uxClipboard = Self then
+    uxClipboard := nil;
   inherited Destroy;
 end;
 
@@ -4333,6 +4351,10 @@ begin
   inherited InitClipboard;
   xia_selection:=xapplication.xia_clipboard;
   xsa_manager:='CLIPBOARD_MANAGER';
+  { Record ourselves so the X11 selection event handlers can reach the real
+    clipboard object through the xclipboard() accessor (fpgClipboard now returns
+    a backend-neutral proxy). }
+  uxClipboard := Self;
 end;
 
 { TfpgX11FileList }

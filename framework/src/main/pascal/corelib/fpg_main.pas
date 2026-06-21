@@ -424,7 +424,22 @@ type
   end;
 
 
-  TfpgClipboard = class(TfpgClipboardImpl)
+  { Runtime-backend clipboard. Like TfpgApplication/TfpgImage, this no longer
+    descends from a compile-time backend (TfpgClipboardImpl). It COMPOSES the
+    clipboard created from fpgBackend^.ClipboardClass and forwards Text to it,
+    so one binary uses the X11 clipboard on X11 and the Wayland clipboard on
+    Wayland. (Previously it descended from the X11 clipboard, whose
+    InitClipboard dereferences the X11-only xapplication global — nil under
+    Wayland, hence a crash on first fpgClipboard use.) }
+  TfpgClipboard = class(TfpgClipboardBase)
+  private
+    FPlatform: TfpgClipboardBase;   { the runtime-selected backend clipboard }
+  protected
+    function    DoGetText: TfpgString; override;
+    procedure   DoSetText(const AValue: TfpgString); override;
+    procedure   InitClipboard; override;
+  public
+    destructor  Destroy; override;
   end;
 
 
@@ -1457,6 +1472,32 @@ begin
     uApplication := TfpgApplication.Create;
   end;
   result := uApplication;
+end;
+
+
+{ TfpgClipboard }
+
+procedure TfpgClipboard.InitClipboard;
+begin
+  { Called from TfpgClipboardBase.Create. Construct the runtime-selected
+    backend clipboard; its own constructor runs the real InitClipboard. }
+  FPlatform := fpgBackend^.ClipboardClass.Create;
+end;
+
+function TfpgClipboard.DoGetText: TfpgString;
+begin
+  Result := FPlatform.Text;
+end;
+
+procedure TfpgClipboard.DoSetText(const AValue: TfpgString);
+begin
+  FPlatform.Text := AValue;
+end;
+
+destructor TfpgClipboard.Destroy;
+begin
+  FPlatform.Free;
+  inherited Destroy;
 end;
 
 
