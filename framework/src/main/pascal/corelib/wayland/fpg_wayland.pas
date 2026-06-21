@@ -925,6 +925,9 @@ begin
   begin
     if WindowType = wtPopup then
       lDisplay.RemoveWindowFromPopupStack(Self);
+    { Freeing the handle fires its free-notification, so any buffer manager
+      caching it drops FWin and unqueues its pending present before the
+      surface/viewport proxies die. }
     FWinHandle.Free;
     if Assigned(FDecor) then
       FreeAndNil(FDecor);

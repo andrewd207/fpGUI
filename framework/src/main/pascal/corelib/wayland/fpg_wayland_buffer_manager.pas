@@ -58,6 +58,10 @@ type
     FHasPending: Boolean;
     procedure AccumulateDamage(x, y, w, h: TfpgCoord);
     procedure Present(ABufIdx: Integer; x, y, w, h: TfpgCoord);
+    { Cache the native handle and (un)register free-notification on it so FWin
+      is dropped the instant the handle is destroyed — never left dangling. }
+    procedure SetWin(ANew: TfpgwWindow);
+    procedure HandleWinFreed(Sender: TObject);
   public
     constructor Create;
     destructor Destroy; override;
@@ -105,29 +109,55 @@ end;
 
 destructor TWaylandBufferManager.Destroy;
 begin
-  { Don't leave a dangling pointer in the app's pending-present list. }
+  { Don't leave a dangling pointer in the app's pending-present list, and drop
+    our free-notification on the handle so it can't call back into a freed us. }
+  SetWin(nil);
   if Assigned(fpgApplication) then
     WApplication.UnqueuePresent(Self);
   FreeBuffer;
   inherited Destroy;
 end;
 
+procedure TWaylandBufferManager.SetWin(ANew: TfpgwWindow);
+begin
+  if ANew = FWin then
+    Exit;
+  if Assigned(FWin) then
+    FWin.RemoveFreeNotification(@HandleWinFreed);
+  FWin := ANew;
+  if Assigned(FWin) then
+    FWin.AddFreeNotification(@HandleWinFreed);
+end;
+
+procedure TWaylandBufferManager.HandleWinFreed(Sender: TObject);
+begin
+  { The cached handle is being destroyed (fires from TfpgwWindow.Destroy before
+    its viewport proxy is freed). Drop the reference and any queued present so
+    FlushPending never marshals to a dead proxy. Set FWin directly rather than
+    via SetWin: the window is mid-teardown, iterating its own notify list, so we
+    must not call back into RemoveFreeNotification. }
+  FWin := nil;
+  FHasPending := False;
+  if Assigned(fpgApplication) then
+    WApplication.UnqueuePresent(Self);
+end;
+
 procedure TWaylandBufferManager.AttachWindow(AWindow: TfpgWindowBase);
 begin
   FWindow := AWindow;
-  FWin := TfpgWaylandWindow(AWindow).WinHandle;
+  SetWin(TfpgWaylandWindow(AWindow).WinHandle);
 end;
 
 procedure TWaylandBufferManager.DetachWindow;
 begin
-  FWin := nil;
+  SetWin(nil);
   FWindow := nil;
 end;
 
 procedure TWaylandBufferManager.ForgetWindow;
 begin
   FHasPending := False;
-  FWin := nil;
+  SetWin(nil);
   FWindow := nil;
   if Assigned(fpgApplication) then
     WApplication.UnqueuePresent(Self);
@@ -295,6 +325,9 @@ var
 begin
   if not FHasPending then
     Exit(True);  { nothing to do — drop from the pending list }
+  { FWin is dropped to nil the instant the handle is destroyed (free-notification
+    from TfpgwWindow), so a queued present for a freed handle lands here as
+    not-Assigned and is simply discarded — never marshaled to a dead proxy. }
   if not Assigned(FWin) or not BufferAllocated or not Assigned(FWin.SurfaceShell) then
   begin
     FHasPending := False;
