@@ -33,7 +33,17 @@ if [[ "${1:-}" == "--pasbuild-phase" ]]; then
   exit 0
 fi
 
-PROJECT_DIR="${PASBUILD_PROJECT_DIR:-$(pwd)}"
+# This is a PasBuild plugin, not a standalone script. PasBuild exports
+# PASBUILD_PROJECT_DIR (the project root) when it invokes us; if it's unset we
+# were run directly, in which case $(pwd) is unreliable and we'd happily create
+# framework/target/units in the wrong place. Refuse, and point at the goal.
+if [[ -z "${PASBUILD_PROJECT_DIR:-}" ]]; then
+  echo "[wayland-units] ERROR: this is a PasBuild plugin — don't run it directly." >&2
+  echo "[wayland-units]   Invoke it as a goal from the fpGUI project root instead:" >&2
+  echo "[wayland-units]       pasbuild wayland-units" >&2
+  exit 1
+fi
+PROJECT_DIR="$PASBUILD_PROJECT_DIR"
 REPO="${PASBUILD_REPOSITORY:-$HOME/.pasbuild/repository}"
 # The wayl binding's package version (override with WAYL_VERSION if it changes).
 VERSION="${WAYL_VERSION:-0.1.0}"
