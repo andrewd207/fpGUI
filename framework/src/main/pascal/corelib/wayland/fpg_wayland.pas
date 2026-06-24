@@ -2036,9 +2036,10 @@ end;
 procedure TfpgWaylandDrop.RejectDrop;
 begin
   inherited RejectDrop;   { FDropStatus := dsRejected }
-  { Accepting a nil mime tells the compositor the surface won't take this drop. }
-  if Assigned(FOffer) then
-    FOffer.Accept(FAcceptSerial, '');
+  { A proper reject is wl_data_offer.accept(serial, nil). The binding can only
+    send a real (length>=1) string, and accept('') would mean "accept the empty
+    mime type" — worse than saying nothing — so we simply do not accept here.
+    Having never accepted a mime, the compositor treats the drop as refused. }
 end;
 
 { Incoming DnD — the application drives the cross-platform drop protocol from
