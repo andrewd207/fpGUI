@@ -4494,7 +4494,12 @@ begin
   msg.Params.mouse.x := ev.xmotion.x_root;
   msg.Params.mouse.y := ev.xmotion.y_root;
 
-  Dispatch(msg);
+  { When composed under a cross-platform shell (TfpgDrag), the shell owns the
+    drag preview window and its FPGM_MOUSEMOVE handler, so deliver there. }
+  if Assigned(Owner) then
+    Owner.Dispatch(msg)
+  else
+    Dispatch(msg);
 
   lTarget := FindWindow(ev.xmotion.root, ev.xmotion.x_root, ev.xmotion.y_root, True);
   if FLastTarget <> lTarget then

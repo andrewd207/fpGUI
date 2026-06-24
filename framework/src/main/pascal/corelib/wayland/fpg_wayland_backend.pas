@@ -79,6 +79,7 @@ begin
   info.FontResourceClass := TfpgFreeTypeFontResource;
   info.TimerClass        := TfpgWaylandTimer;
   info.ClipboardClass    := TfpgWaylandClipboard;
+  info.DragClass         := TfpgWaylandDrag;
   info.IsAvailable       := @WaylandAvailable;
   info.InstallHooks      := @WaylandInstallHooks;
   fpgRegisterBackend(info);

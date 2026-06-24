@@ -72,6 +72,7 @@ begin
   info.FontResourceClass := TfpgX11FontResource;
   info.TimerClass        := TfpgX11Timer;
   info.ClipboardClass    := TfpgX11Clipboard;
+  info.DragClass         := TfpgX11Drag;
   info.IsAvailable       := @X11Available;
   info.InstallHooks      := @X11InstallHooks;
   fpgRegisterBackend(info);

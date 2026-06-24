@@ -454,23 +454,32 @@ type
   TfpgDragPaintEvent = procedure(ASender: TfpgDrag; ACanvas: TfpgCanvas) of object;
 
 
-  TfpgDrag = class(TfpgDragImpl)
+  { Runtime-backend drag shell. Like TfpgApplication/TfpgImage, this no longer
+    descends from a compile-time backend (TfpgDragImpl); it COMPOSES the
+    runtime-selected backend drag (FPlatform, from fpgBackend^.DragClass) and
+    forwards Execute/MimeData to it. The cross-platform preview window and its
+    FPGM_MOUSEMOVE handler stay here; the backend dispatches drag mouse-moves
+    back to this shell via FPlatform.Owner. This is what stops a drag started
+    on Wayland from running the X11 drag against a nil xapplication. }
+  TfpgDrag = class(TfpgDragBase)
   private
+    FPlatform: TfpgDragBase;   { the runtime-selected backend drag }
     FOnPaintPreview: TfpgDragPaintEvent;
     FPreviewSize: TfpgSize;
     FTarget: TfpgWinHandle;
-    procedure   SetMimeData(const AValue: TfpgMimeDataBase);
+    function    GetMimeData: TfpgMimeDataBase;
+    procedure   SetMimeData(const AValue: TfpgMimeDataBase); override;
     procedure   MsgMouseMove(var msg: TfpgMessageRec); message FPGM_MOUSEMOVE;
   protected
     FPreviewWin: TfpgWidgetBase; // TfpgDNDWindow
     procedure   DoOnPaintPreview(ACanvas: TfpgCanvas);
   public
-    constructor Create(ASource: TfpgWidgetBase);
+    constructor Create(ASource: TfpgWidgetBase); override;
     destructor  Destroy; override;
     function    Execute(const ADropActions: TfpgDropActions = [daCopy]; const ADefaultAction: TfpgDropAction = daCopy): TfpgDropAction; override;
     property    Source: TfpgWidgetBase read GetSource;
     property    Target: TfpgWinHandle read FTarget write FTarget;
-    property    MimeData: TfpgMimeDataBase read FMimeData write SetMimeData;
+    property    MimeData: TfpgMimeDataBase read GetMimeData write SetMimeData;
     property    PreviewSize: TfpgSize read FPreviewSize write FPreviewSize;
     property    OnPaintPreview: TfpgDragPaintEvent read FOnPaintPreview write FOnPaintPreview;
   end;
@@ -3570,11 +3579,15 @@ end;
 
 { TfpgDrag }
 
+function TfpgDrag.GetMimeData: TfpgMimeDataBase;
+begin
+  Result := FPlatform.MimeData;
+end;
+
 procedure TfpgDrag.SetMimeData(const AValue: TfpgMimeDataBase);
 begin
-  if Assigned(FMimeData) then
-    FMimeData.Free;
-  FMimeData := AValue;
+  { The backend drag owns and frees the mimedata; this shell does not. }
+  FPlatform.MimeData := AValue;
 end;
 
 procedure TfpgDrag.MsgMouseMove(var msg: TfpgMessageRec);
@@ -3603,12 +3616,17 @@ constructor TfpgDrag.Create(ASource: TfpgWidgetBase);
 begin
   inherited Create(ASource);
   FSource := ASource;
+  { Compose the runtime-selected backend drag and let it deliver drag
+    mouse-moves back to this shell (which owns the preview window). }
+  FPlatform := fpgBackend^.DragClass.Create(ASource);
+  FPlatform.Owner := Self;
   FPreviewWin := TfpgDNDWindow.Create(nil, Self);
 end;
 
 destructor TfpgDrag.Destroy;
 begin
   FPreviewWin.Free;
+  FreeAndNil(FPlatform);
   inherited Destroy;
 end;
 
@@ -3616,7 +3634,7 @@ function TfpgDrag.Execute(const ADropActions: TfpgDropActions;
   const ADefaultAction: TfpgDropAction): TfpgDropAction;
 begin
   {$NOTE These exception messages need to become resource strings }
-  if not Assigned(FMimeData) then
+  if not Assigned(FPlatform.MimeData) then
     raise Exception.Create(ClassName + ': No mimedata was set before starting the drag');
   if not Assigned(FSource) then
     raise Exception.Create(ClassName + ': No Source window was specified before starting the drag');
@@ -3624,7 +3642,7 @@ begin
     raise Exception.Create(ClassName + ': No Drop Action was specified');
   if Assigned(FOnPaintPreview) or TfpgDNDWindow(FPreviewWin).HasWidgetChildren then
     TfpgDNDWindow(FPreviewWin).Show(FPreviewSize);
-  Result := inherited Execute(ADropActions, ADefaultAction);
+  Result := FPlatform.Execute(ADropActions, ADefaultAction);
 end;
 
 

@@ -1006,12 +1006,21 @@ type
     FSource: TfpgWidgetBase;
     FDragging: Boolean;
     FMimeData: TfpgMimeDataBase;
+    { When a backend drag is composed by a cross-platform shell (TfpgDrag),
+      the shell registers itself here so the backend can deliver drag messages
+      (e.g. FPGM_MOUSEMOVE for the preview window) to the shell that owns them. }
+    FOwner: TfpgDragBase;
   protected
     function	GetSource: TfpgWidgetBase; virtual;
+    procedure   SetMimeData(const AValue: TfpgMimeDataBase); virtual;
   public
-    constructor Create(ASource: TfpgWidgetBase);
+    { virtual so it can be constructed through a class reference (the runtime
+      backend registry, fpgBackend^.DragClass.Create). }
+    constructor Create(ASource: TfpgWidgetBase); virtual;
     destructor  Destroy; override;
     function    Execute(const ADropActions: TfpgDropActions; const ADefaultAction: TfpgDropAction = daCopy): TfpgDropAction; virtual; abstract;
+    property    MimeData: TfpgMimeDataBase read FMimeData write SetMimeData;
+    property    Owner: TfpgDragBase read FOwner write FOwner;
   end;
 
 
@@ -4877,6 +4886,14 @@ end;
 function TfpgDragBase.GetSource: TfpgWidgetBase;
 begin
   Result := FSource;
+end;
+
+procedure TfpgDragBase.SetMimeData(const AValue: TfpgMimeDataBase);
+begin
+  if FMimeData = AValue then
+    Exit;
+  FMimeData.Free;
+  FMimeData := AValue;
 end;
 
 

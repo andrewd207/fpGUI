@@ -241,6 +241,8 @@ type
   end;
 
 
+  TfpgWaylandDrop = class;   { forward — referenced by the application below }
+
   { TfpgWaylandApplication }
 
   TfpgWaylandApplication = class (TfpgApplicationBase)
@@ -270,6 +272,12 @@ type
     FDecorationDrawer: TfpgWaylandDecorationDrawer;
     FDecorationStyle: TfpgWaylandDecorationStyle;
     FOwnsDecorationDrawer: Boolean;
+    { Active incoming drop, alive between a wl_data_device enter and leave/drop. }
+    FDrop: TfpgWaylandDrop;
+    procedure HandleDndEnter(Sender: TObject; AWindow: TfpgwWindow; AX, AY: Integer; AOffer: TfpgwDataOffer);
+    procedure HandleDndMotion(Sender: TObject; ATime: LongWord; AX, AY: Integer);
+    procedure HandleDndLeave(Sender: TObject);
+    procedure HandleDndDrop(Sender: TObject; AOffer: TfpgwDataOffer);
     procedure SetDecorationDrawer(AValue: TfpgWaylandDecorationDrawer);
     procedure SetDecorationStyle(AValue: TfpgWaylandDecorationStyle);
     procedure KeyboardRepeatDelayExpired(Sender: TObject);
@@ -352,15 +360,38 @@ type
 
   end;
 
-  { TfpgWaylandDrag }
+  { TfpgWaylandDrag — outgoing drag source. Builds a wl_data_source from the
+    drag's mime data, starts the compositor drag, and pumps the event loop until
+    the source reports finished or cancelled. }
 
   TfpgWaylandDrag = class(TfpgDragBase)
-    function Execute(const ADropActions: TfpgDropActions = [daCopy]; const ADefaultAction: TfpgDropAction = daCopy): TfpgDropAction; virtual;
-
+  private
+    FCancelled: Boolean;
+    procedure SourceCancelled(Sender: TObject);
+  public
+    function Execute(const ADropActions: TfpgDropActions = [daCopy]; const ADefaultAction: TfpgDropAction = daCopy): TfpgDropAction; override;
   end;
 
-  TfpgWaylandDrop = class (TfpgDropBase)
+  { TfpgWaylandDrop — incoming drop target. One instance lives on the
+    application for the duration of a drag over our windows; the application's
+    OnDnd* handlers drive the cross-platform TfpgDropBase protocol through it. }
 
+  TfpgWaylandDrop = class (TfpgDropBase)
+  private
+    FOffer: TfpgwDataOffer;       { the incoming offer (not owned) }
+    FTopWindow: TfpgWindowBase;   { fpGUI window the drag is over }
+    FAcceptSerial: DWord;         { wl_data_device.enter serial, for accept }
+    FDropAction: TfpgDropAction;
+  protected
+    function    GetDropAction: TfpgDropAction; override;
+    procedure   SetDropAction(AValue: TfpgDropAction); override;
+    function    GetWindowForDrop: TfpgWindowBase; override;
+    procedure   AcceptDrop; override;
+    procedure   RejectDrop; override;
+  public
+    property    Offer: TfpgwDataOffer read FOffer write FOffer;
+    property    TopWindow: TfpgWindowBase read FTopWindow write FTopWindow;
+    property    AcceptSerial: DWord read FAcceptSerial write FAcceptSerial;
   end;
 
   TfpgWaylandTimer = class (TfpgBaseTimer)
@@ -383,8 +414,41 @@ type
 implementation
 uses
   fpg_cmdlineparams, fpg_main, ctypes, fpg_widget,
-  fpg_stringutils, fpg_popupwindow,
+  fpg_stringutils, fpg_popupwindow, variants,
   fpg_wayland_decorations, fpg_wayland_buffer_manager, agg_basics, process;
+
+type
+  { Reaches TfpgApplication.WaitWindowMessage (protected) so a blocking drag can
+    run a nested message pump — mirrors the X11 backend's TApplicationHelper. }
+  TWaylandAppHelper = class(TfpgApplication);
+
+var
+  { The drag started by THIS process, while it runs. Lets an incoming drop that
+    is our OWN drag read the payload straight from the drag's mime data instead
+    of the wl_data_offer pipe — a same-process pipe receive would deadlock (the
+    source's send handler can't run while we block reading). Mirrors the
+    clipboard's same-process short-circuit (FOwnClipboardText). }
+  uActiveWaylandDrag: TfpgWaylandDrag = nil;
+
+{ Map an fpGUI drop-action set to the wl_data_device_manager dnd-action bits.
+  Wayland has no 'link'; daLink/daAsk fall back to copy. }
+function fpgToWlDndActions(AActions: TfpgDropActions): TWlDataDeviceManager.TDndAction;
+begin
+  Result.Value := 0;
+  if daCopy in AActions then Result.Copy := True;
+  if daMove in AActions then Result.Move := True;
+  if (daLink in AActions) or (daAsk in AActions) then Result.Copy := True;
+  if Result.Value = 0 then Result.Copy := True;  { always offer something }
+end;
+
+{ Map a single negotiated wl dnd-action bit back to an fpGUI drop action. }
+function wlToFpgDropAction(AAction: TWlDataDeviceManager.TDndAction): TfpgDropAction;
+begin
+  if AAction.Move then Result := daMove
+  else if AAction.Copy then Result := daCopy
+  else if AAction.Ask then Result := daAsk
+  else Result := daIgnore;
+end;
 
 { Run a command and return its trimmed stdout (with surrounding single quotes
   stripped, as emitted by gsettings). Empty string on any failure. }
@@ -1865,10 +1929,209 @@ end;
 
 { TfpgWaylandDrag }
 
+procedure TfpgWaylandDrag.SourceCancelled(Sender: TObject);
+begin
+  { wl_data_source.cancelled fired (drag released over nothing, or rejected).
+    The binding frees the source object right after this, so just flag it — the
+    Execute loop must not touch the source again. }
+  FCancelled := True;
+end;
+
 function TfpgWaylandDrag.Execute(const ADropActions: TfpgDropActions;
   const ADefaultAction: TfpgDropAction): TfpgDropAction;
+var
+  src: TfpgwDataSource;
+  i: Integer;
+  item: TfpgMimeDataItem;
+  s: String;
+  origin: TfpgwWindow;
 begin
+  Result := daIgnore;
+  if not Assigned(FMimeData) or (FMimeData.Count = 0) then
+    Exit;
+  if not Assigned(FSource) or not Assigned(FSource.Window) then
+    Exit;
 
+  origin := TfpgWaylandWindow(FSource.Window).WinHandle;
+  if not Assigned(origin) then
+    Exit;
+
+  src := WApplication.Display.CreateDataSource;
+  for i := 0 to FMimeData.Count - 1 do
+  begin
+    item := FMimeData.Items[i];
+    s := VarToStr(item.data);
+    src.SetData(item.format, s);
+    if item.format = 'text/plain' then
+    begin
+      { Also offer the charset-tagged + legacy aliases so foreign apps that ask
+        for 'text/plain;charset=utf-8'/UTF8_STRING/TEXT still get the payload. }
+      src.SetData('text/plain;charset=utf-8', s);
+      src.SetData('UTF8_STRING', s);
+      src.SetData('TEXT', s);
+    end;
+  end;
+  src.SetDndActions(fpgToWlDndActions(ADropActions));
+  src.OnCancelled := @SourceCancelled;
+
+  FCancelled := False;
+  FDragging := True;
+  uActiveWaylandDrag := Self;
+  try
+    WApplication.Display.StartDrag(src, origin);
+    { Pump until the source is done. cancelled FREES src (don't read it after),
+      so test FCancelled FIRST — boolean eval is short-circuit under -Mobjfpc. }
+    while not (FCancelled or src.DndFinished) do
+      TWaylandAppHelper(fpgApplication).WaitWindowMessage(50);
+
+    if not FCancelled then
+    begin
+      Result := wlToFpgDropAction(src.DndAction);
+      src.Free;   { finished path: the binding does not free the source }
+    end;
+  finally
+    uActiveWaylandDrag := nil;
+    FDragging := False;
+    if Assigned(FSource) then
+      FSource.MouseCursor := mcDefault;
+  end;
+end;
+
+{ TfpgWaylandDrop }
+
+function TfpgWaylandDrop.GetDropAction: TfpgDropAction;
+begin
+  Result := FDropAction;
+end;
+
+procedure TfpgWaylandDrop.SetDropAction(AValue: TfpgDropAction);
+begin
+  FDropAction := AValue;
+end;
+
+function TfpgWaylandDrop.GetWindowForDrop: TfpgWindowBase;
+begin
+  Result := FTopWindow;
+end;
+
+procedure TfpgWaylandDrop.AcceptDrop;
+var
+  supported, preferred: TWlDataDeviceManager.TDndAction;
+begin
+  inherited AcceptDrop;   { FDropStatus := dsAccepted }
+  if not Assigned(FOffer) then
+    Exit;
+  { Tell the compositor (and source) we accept the chosen mime, and which
+    actions we support — this drives the 'will-drop' cursor and the source's
+    target/action events. }
+  FOffer.Accept(FAcceptSerial, MimeChoice);
+  supported.Value := 0;
+  supported.Copy := True;
+  supported.Move := True;
+  preferred.Value := 0;
+  preferred.Move := True;   { tabs/text move by default; compositor narrows it }
+  FOffer.SetActions(supported, preferred);
+end;
+
+procedure TfpgWaylandDrop.RejectDrop;
+begin
+  inherited RejectDrop;   { FDropStatus := dsRejected }
+  { Accepting a nil mime tells the compositor the surface won't take this drop. }
+  if Assigned(FOffer) then
+    FOffer.Accept(FAcceptSerial, '');
+end;
+
+{ Incoming DnD — the application drives the cross-platform drop protocol from
+  the binding's data_device events. }
+
+procedure TfpgWaylandApplication.HandleDndEnter(Sender: TObject;
+  AWindow: TfpgwWindow; AX, AY: Integer; AOffer: TfpgwDataOffer);
+var
+  lWin: TfpgWaylandWindow;
+  i: Integer;
+begin
+  FreeAndNil(FDrop);
+  if not Assigned(AWindow) or not Assigned(AOffer) then
+    Exit;
+  lWin := TfpgWaylandWindow(AWindow.Owner);
+  if not Assigned(lWin) then
+    Exit;
+
+  FDrop := TfpgWaylandDrop.Create;
+  FDrop.Offer := AOffer;
+  FDrop.TopWindow := lWin;
+  { EventSerial == the enter serial right now (the binding just set it from
+    wl_data_device.enter before invoking us); capture it for offer.accept. }
+  FDrop.AcceptSerial := FDisplay.EventSerial;
+  { Mirror the advertised mime types into the cross-platform list so widgets
+    can choose one via TfpgDrop.AcceptMimeType. }
+  for i := 0 to AOffer.MimeTypes.Count - 1 do
+    FDrop.Mimetypes.Add(TfpgMimeDataItem.Create(AOffer.MimeTypes[i], ''));
+
+  { Deliver the initial position (finds the target widget + fires enter). }
+  HandleDndMotion(Sender, 0, AX, AY);
+end;
+
+procedure TfpgWaylandApplication.HandleDndMotion(Sender: TObject;
+  ATime: LongWord; AX, AY: Integer);
+var
+  lWin: TfpgWaylandWindow;
+begin
+  if not Assigned(FDrop) then
+    Exit;
+  lWin := TfpgWaylandWindow(FDrop.TopWindow);
+  { Surface coords -> content coords (accounts for CSD frame), matching the
+    pointer-motion path. }
+  lWin.AdjustMousePos(AX, AY);
+  FDrop.SetPosition(AX, AY);
+  FDisplay.Flush;   { send the accept/set_actions the widget triggered }
+end;
+
+procedure TfpgWaylandApplication.HandleDndLeave(Sender: TObject);
+begin
+  { The drag left our surfaces (or was cancelled). The binding frees the offer
+    after this returns; drop our drop object (which sends a widget leave). }
+  FreeAndNil(FDrop);
+end;
+
+procedure TfpgWaylandApplication.HandleDndDrop(Sender: TObject;
+  AOffer: TfpgwDataOffer);
+var
+  data: Variant;
+  txt: String;
+  b: TBytes;
+begin
+  if not Assigned(FDrop) then
+  begin
+    { No active drop object — release the offer the binding handed us. }
+    AOffer.Free;
+    Exit;
+  end;
+
+  if FDrop.DropStatus = dsAccepted then
+  begin
+    { Read the payload. Same-process drag: take it straight from our own drag's
+      mime data (a pipe receive would deadlock). Cross-process: pull it over the
+      wl_data_offer pipe. }
+    if Assigned(uActiveWaylandDrag) and Assigned(uActiveWaylandDrag.MimeData) then
+      data := uActiveWaylandDrag.MimeData.GetData(FDrop.MimeChoice)
+    else
+    begin
+      b := AOffer.Receive(FDrop.MimeChoice);
+      SetLength(txt, Length(b));
+      if Length(b) > 0 then
+        Move(b[0], txt[1], Length(b));
+      data := txt;
+    end;
+    FDrop.SetDropData(data);
+    FDrop.DataDropComplete;     { fires FPGM_DROPDROP / widget Drop handler }
+    AOffer.Finish;              { tell the source the drop is done }
+  end;
+
+  FDisplay.Flush;
+  AOffer.Free;                  { the binding passed ownership to us }
+  FDrop.Offer := nil;          { don't dangle }
+  FreeAndNil(FDrop);
 end;
 
 { TfpgWaylandApplication }
@@ -2467,6 +2730,11 @@ begin
   FDisplay.OnKeyboardModifiers:=@UpdateKeyState;
   // tells us how to repeat keys
   FDisplay.OnKeyBoardRepeatInfo:=@SetKeyboardRepeat;
+  { Incoming drag-and-drop (a drag hovering/dropping over our windows). }
+  FDisplay.OnDndEnter:=@HandleDndEnter;
+  FDisplay.OnDndMotion:=@HandleDndMotion;
+  FDisplay.OnDndLeave:=@HandleDndLeave;
+  FDisplay.OnDndDrop:=@HandleDndDrop;
 
   FDisplay.AfterCreate;
 

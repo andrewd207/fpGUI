@@ -67,6 +67,7 @@ type
   TfpgFontResCls     = class of TfpgFontResourceBase;
   TfpgTimerCls       = class of TfpgBaseTimer;
   TfpgClipboardCls   = class of TfpgClipboardBase;
+  TfpgDragCls        = class of TfpgDragBase;
 
   { Optional per-backend callbacks. }
   TfpgBackendAvailableFunc = function: Boolean;
@@ -88,6 +89,9 @@ type
     FontResourceClass: TfpgFontResCls;
     TimerClass:        TfpgTimerCls;
     ClipboardClass:    TfpgClipboardCls;
+    { Outgoing drag-and-drop source object. Routed through the registry so a
+      drag started on Wayland does not run the X11 drag (nil xapplication). }
+    DragClass:         TfpgDragCls;
     { nil => always available; else queried during auto selection. }
     IsAvailable:       TfpgBackendAvailableFunc;
     { nil => nothing; else installs backend-wide hooks (buffer manager / agg
