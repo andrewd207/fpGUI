@@ -1021,6 +1021,8 @@ type
     function    Execute(const ADropActions: TfpgDropActions; const ADefaultAction: TfpgDropAction = daCopy): TfpgDropAction; virtual; abstract;
     property    MimeData: TfpgMimeDataBase read FMimeData write SetMimeData;
     property    Owner: TfpgDragBase read FOwner write FOwner;
+    { The widget the drag originated from. }
+    property    Source: TfpgWidgetBase read GetSource;
   end;
 
 

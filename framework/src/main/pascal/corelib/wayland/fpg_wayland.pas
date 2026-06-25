@@ -397,6 +397,11 @@ type
     procedure   AcceptDrop; override;
     procedure   RejectDrop; override;
   public
+    { Set the originating widget for a SAME-process drag (recovered from the
+      active TfpgWaylandDrag). X11 fills SourceWidget automatically; on Wayland
+      the offer carries no in-process widget, so the backend supplies it here so
+      target widgets can identify their own drag without app-side bookkeeping. }
+    procedure   SetSourceWidget(AWidget: TfpgWidgetBase);
     property    Offer: TfpgwDataOffer read FOffer write FOffer;
     property    TopWindow: TfpgWindowBase read FTopWindow write FTopWindow;
     property    AcceptSerial: DWord read FAcceptSerial write FAcceptSerial;
@@ -2076,6 +2081,11 @@ begin
   FOffer.SetActions(supported, preferred);
 end;
 
+procedure TfpgWaylandDrop.SetSourceWidget(AWidget: TfpgWidgetBase);
+begin
+  FSourceWidget := AWidget;
+end;
+
 procedure TfpgWaylandDrop.RejectDrop;
 begin
   inherited RejectDrop;   { FDropStatus := dsRejected }
@@ -2107,6 +2117,11 @@ begin
   { EventSerial == the enter serial right now (the binding just set it from
     wl_data_device.enter before invoking us); capture it for offer.accept. }
   FDrop.AcceptSerial := FDisplay.EventSerial;
+  { Same-process drag: the wl_data_offer carries no in-process widget, so
+    recover the source widget from our own active drag (X11 fills this in
+    automatically). Cross-process drags leave it nil — the source is elsewhere. }
+  if Assigned(uActiveWaylandDrag) then
+    FDrop.SetSourceWidget(uActiveWaylandDrag.Source);
   { Mirror the advertised mime types into the cross-platform list so widgets
     can choose one via TfpgDrop.AcceptMimeType. }
   for i := 0 to AOffer.MimeTypes.Count - 1 do
