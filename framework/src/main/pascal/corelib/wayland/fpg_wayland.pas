@@ -65,6 +65,11 @@ type
     //FDecoratorCanvas: TObject; {Tagg2dWaylandBufferCanvas}
     FDecor: TObject;
     FWinHandle: TfpgwWindow;
+    { For a popup, the parent window handle it is anchored to — used to convert
+      the compositor's parent-window-geometry-relative popup position back into
+      fpGUI's parent-content-relative coordinates (they differ by the parent's
+      CSD frame insets). }
+    FPopupParentHandle: TfpgwWindow;
     FMousePos: TfpgPoint;
     { Client-side decoration frame insets (0 when undecorated or the compositor
       draws server-side decorations). The app content is drawn inset by
@@ -85,6 +90,9 @@ type
     // these 'Send___Message procedures are meant to convert the wayland events into FPGM_XXX messages
     procedure SendCloseWindowMessage(Sender: TObject);
     procedure SendConfigureMessage(Sender: TObject; AEdges: LongWord; AWidth, AHeight: LongInt);
+    { The compositor placed/repositioned this popup (it may have flipped or slid
+      it to keep it on-screen). Sync fpGUI's logical position to match. }
+    procedure SendPopupConfigure(Sender: TObject; AX, AY, AWidth, AHeight: Integer);
     procedure SendPaintMessage(Sender: TObject);
   protected
     FModalForWin: TfpgWaylandWindow;
@@ -847,6 +855,34 @@ begin
   lWidget.InvalidateRect(fpgRect(0, 0, lWidget.Width, lWidget.Height));
 end;
 
+procedure TfpgWaylandWindow.SendPopupConfigure(Sender: TObject;
+  AX, AY, AWidth, AHeight: Integer);
+var
+  msgp: TfpgMessageParams;
+  lLeft, lTop: Integer;
+begin
+  { The compositor reports the popup's final position relative to the parent's
+    window-geometry origin; if its positioner constraint kicked in it has been
+    flipped/slid to keep the popup on a single output and on-screen. Convert
+    back to fpGUI's parent-CONTENT-relative coordinates (subtract the parent's
+    CSD frame insets, which the anchor's SetOffset added) and sync our logical
+    position so submenus anchor off the real placement and any geometry query is
+    truthful. There is no visual move: DoMoveWindow/DoUpdateWindowPosition are
+    no-ops on Wayland — the surface already sits where the compositor put it. }
+  lLeft := AX;
+  lTop  := AY;
+  if Assigned(FPopupParentHandle) then
+  begin
+    Dec(lLeft, FPopupParentHandle.ContentOffsetX);
+    Dec(lTop,  FPopupParentHandle.ContentOffsetY);
+  end;
+  if (lLeft <> Left) or (lTop <> Top) then
+  begin
+    msgp.rect.SetRect(lLeft, lTop, Width, Height);
+    fpgPostMessage(Self, Self, FPGM_MOVE, msgp);
+  end;
+end;
+
 procedure TfpgWaylandWindow.DecoratorPaint(Sender: TObject);
 begin
   { Client-side decoration painting disabled — server-side decorations. }
@@ -949,6 +985,13 @@ begin
     FWinHandle.OnPaint:=@SendPaintMessage;
     FWinHandle.OnConfigure:=@SendConfigureMessage;
     FWinHandle.OnClose:=@SendCloseWindowMessage;
+    if WindowType = wtPopup then
+    begin
+      { Remember the anchor parent so SendPopupConfigure can undo its content
+        offset, and react to the compositor's on-screen placement. }
+      FPopupParentHandle := lPopupFor;
+      FWinHandle.OnPopupConfigure:=@SendPopupConfigure;
+    end;
 
     if WindowType in [wtWindow, wtModalForm] then
     begin
