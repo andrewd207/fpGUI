@@ -2972,6 +2972,7 @@ destructor TfpgWaylandApplication.Destroy;
 begin
   if FOwnsDecorationDrawer then
     FDecorationDrawer.Free;
+  FSelection.Free;
   FDisplay.Free;
   FPopupStack.Free;
   FPendingPresents.Free;

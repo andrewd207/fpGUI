@@ -1777,6 +1777,11 @@ begin
       initialized state (the backend connects to the display in its ctor). }
     FPlatform := fpgBackend^.ApplicationClass.Create(AParams);
     FIsInitialized := FPlatform.IsInitialized;
+    { Adopt the backend's PRIMARY-selection object. The backend app creates it
+      in its own ctor (on its own FSelection field); without this the wrapper's
+      FSelection stays nil and fpgApplication.selection crashes on first use
+      (e.g. text-edit mouse-up copying to the X11/Wayland primary selection). }
+    FSelection := FPlatform.selection;
     if IsInitialized then
     begin
       { Populate desktop topology from platform backend }
