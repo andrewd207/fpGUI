@@ -967,6 +967,7 @@ var
   lActiveWindow: TfpgwWindow;
   lPopupGrab: Boolean = False;
   lGrabSerial: DWord = 0;
+  lModalParent: TfpgWaylandWindow;
 begin
   if FWinHandle = nil then
   begin
@@ -1054,6 +1055,24 @@ begin
       end;
       { Apply the initial resize constraints (fixed vs sizeable, Min/Max). }
       ApplyResizeConstraints;
+
+      { Modal dialog: mark the toplevel transient-for its owner — the previous
+        modal in the stack, else the main form — mirroring the X11 transient-for
+        hint. The compositor then keeps the dialog stacked above its parent and
+        groups them, so the parent can't overlap it (fpGUI's modal loop already
+        blocks input to the other windows). }
+      if WindowType = wtModalForm then
+      begin
+        lModalParent := nil;
+        if Assigned(fpgApplication.PrevModalForm) then
+          lModalParent := TfpgWaylandWindow(fpgApplication.PrevModalForm)
+        else if Assigned(fpgApplication.MainForm)
+            and Assigned(fpgApplication.MainForm.Window) then
+          lModalParent := TfpgWaylandWindow(fpgApplication.MainForm.Window);
+        if Assigned(lModalParent) and (lModalParent <> Self)
+        and Assigned(lModalParent.WinHandle) then
+          FWinHandle.SurfaceShell.SetParent(lModalParent.WinHandle);
+      end;
     end;
 
     if WindowType = wtPopup then
