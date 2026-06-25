@@ -314,6 +314,10 @@ type
       TWaylandBufferManager (typed as TObject to avoid a unit cycle). }
     procedure   FlushPendingPresents;
   public
+    { True when an input event for AWin must be dropped because a modal form is
+      showing and AWin belongs to a different (blockable) form — mirrors the X11
+      backend's modal event filtering. Popups/menus (no parent form) pass. }
+    function    ModalBlocked(AWin: TfpgWaylandWindow): Boolean;
     constructor Create(const AParams: string = ''); override;
     destructor  Destroy; override;
     procedure   QueuePresent(ABufferManager: TObject);
@@ -431,7 +435,7 @@ type
 implementation
 uses
   fpg_cmdlineparams, fpg_main, ctypes, fpg_widget,
-  fpg_stringutils, fpg_popupwindow, variants,
+  fpg_stringutils, fpg_popupwindow, fpg_form, variants,
   fpg_wayland_decorations, fpg_wayland_buffer_manager, fpg_hybrid_canvas,
   agg_basics, process;
 
@@ -946,6 +950,10 @@ end;
 
 procedure TfpgWaylandWindow.SendCloseWindowMessage(Sender: TObject);
 begin
+  { A modal dialog blocks closing other forms (e.g. the parent's close button),
+    matching the X11 backend's WM_DELETE filtering. }
+  if WApplication.ModalBlocked(Self) then
+    Exit;
   fpgSendMessage(Self, Self, FPGM_CLOSE);
 end;
 
@@ -2392,6 +2400,11 @@ var
   lCode: LongWord;
   lKeySyms: Pxkb_keysym_t;
 begin
+  { Drop keystrokes aimed at a non-modal form while a modal dialog is up. On
+    Wayland the modal normally also holds compositor keyboard focus, but this
+    guards the case where focus lingers on the parent. }
+  if ModalBlocked(TfpgWaylandWindow(Sender)) then
+    Exit;
   lCode := AKey+8; // yes I know....
   lNumSyms := FKeyboard.KeyGetSyms(lCode, @lKeySyms);
   lKeySym := lKeySyms[0];
@@ -2462,6 +2475,29 @@ begin
   fpgPostMessage(nil, Sender, FPGM_DEACTIVATE);
 end;
 
+function TfpgWaylandApplication.ModalBlocked(AWin: TfpgWaylandWindow): Boolean;
+var
+  lForm: TfpgForm;
+  lFormWin: TfpgWindowBase;
+begin
+  Result := False;
+  { The modal stack lives on the cross-platform application SHELL (fpgApplication),
+    not on this backend instance (FPlatform), so query it there. }
+  if not Assigned(fpgApplication.TopModalForm) then
+    Exit;
+  if not Assigned(AWin) or not Assigned(AWin.Owner) then
+    Exit;
+  { Resolve the owning form. Popups/menus have no parent form (nil) -> never
+    blocked, so menus still work inside a modal dialog (matches X11). }
+  lForm := WidgetParentForm(TfpgWidget(AWin.Owner));
+  if lForm = nil then
+    Exit;
+  lFormWin := lForm.Window;
+  Result := Assigned(lFormWin)
+        and (fpgApplication.TopModalForm.Window <> lFormWin)
+        and not (waUnblockableMessages in lFormWin.WindowAttributes);
+end;
+
 procedure TfpgWaylandApplication.SendMouseAxisMessage(Sender: TObject;
   ATime: LongWord; AAxis: TWlPointer.TAxis; AValue: LongInt);
 var
@@ -2470,6 +2506,8 @@ var
   lDest: TfpgWidgetBase;
   lWin: TfpgWaylandWindow absolute Sender;
 begin
+  if ModalBlocked(lWin) then
+    Exit;
   //WriteLn('Axis: ', AAxis, ' value ', AValue);
   case AAxis of
     TWlPointer.TAxis.axVerticalscroll: msg:=FPGM_SCROLL;
@@ -2506,6 +2544,8 @@ var
   lEnum: TShiftStateEnum;
   msgp: TfpgMessageParams;
 begin
+  if ModalBlocked(lWin) then
+    Exit;
   { Dismiss open popups only on a button PRESS outside the popup stack — never
     on a release. A dropdown/menu opened on mouse-down would otherwise be closed
     by the matching mouse-up landing on the parent window. (We have no popup
@@ -2596,6 +2636,8 @@ var
   msgp: TfpgMessageParams;
   lWin: TfpgWaylandWindow absolute Sender;
 begin
+  if ModalBlocked(lWin) then
+    Exit;
   lWin.AdjustMousePos(AX, AY); { translate surface coords to content coords }
 
   lWin.FMousePos.SetPoint(AX, AY);
