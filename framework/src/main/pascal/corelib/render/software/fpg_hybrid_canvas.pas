@@ -94,6 +94,13 @@ type
     constructor Create(awidget: TfpgWidgetBase); override;
     destructor  Destroy; override;
     procedure   GradientFill(ARect: TfpgRect; AStart, AStop: TfpgColor; ADirection: TGradientDirection); override;
+    { Offscreen rendering into a caller-supplied buffer, bypassing the window
+      and buffer manager. Point the canvas at AData (AStride bytes/row; pixel
+      format is BGRA32, byte-identical to wl_shm ARGB8888 little-endian), issue
+      the normal canvas draw calls, then EndDrawToBuffer. Used for a Wayland
+      drag-icon surface. The caller owns AData and presents it. }
+    procedure   BeginDrawToBuffer(AData: Pointer; AWidth, AHeight, AStride: Integer);
+    procedure   EndDrawToBuffer;
   end;
 
 
@@ -160,6 +167,27 @@ begin
   end;
   FAgg.Destruct;
   inherited Destroy;
+end;
+
+procedure THybridCanvas.BeginDrawToBuffer(AData: Pointer; AWidth, AHeight, AStride: Integer);
+begin
+  { Offscreen: drive Agg + the text path off the caller's buffer directly. No
+    EnsureWindowAttached / DoAllocateBuffer (those need a window); the draw core
+    only reads FBufData/FBufStride/FBufWidth/FBufHeight + the attached FAgg. }
+  FBufData   := AData;
+  FBufWidth  := AWidth;
+  FBufHeight := AHeight;
+  FBufStride := AStride;
+  FDeltaX    := 0;
+  FDeltaY    := 0;
+  FAgg.attach(int8u_ptr(FBufData), FBufWidth, FBufHeight, FBufStride);
+  FAgg.clipBox(0, 0, AWidth, AHeight);
+end;
+
+procedure THybridCanvas.EndDrawToBuffer;
+begin
+  { Nothing to flush — the caller's wl_surface reads the shm buffer directly. }
+  FBufData := nil;
 end;
 
 procedure THybridCanvas.EnsureWindowAttached;

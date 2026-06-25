@@ -1023,6 +1023,11 @@ type
     property    Owner: TfpgDragBase read FOwner write FOwner;
     { The widget the drag originated from. }
     property    Source: TfpgWidgetBase read GetSource;
+    { True if the platform supplies its own drag icon (e.g. Wayland's
+      wl_data_device drag-icon surface, which the compositor moves with the
+      pointer). The cross-platform preview window is then not shown. Default
+      False — X11/GDI use the TfpgDNDWindow preview. }
+    function    UsesPlatformDragIcon: Boolean; virtual;
   end;
 
 
@@ -4896,6 +4901,11 @@ begin
     Exit;
   FMimeData.Free;
   FMimeData := AValue;
+end;
+
+function TfpgDragBase.UsesPlatformDragIcon: Boolean;
+begin
+  Result := False;
 end;
 
 

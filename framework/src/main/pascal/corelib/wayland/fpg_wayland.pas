@@ -376,8 +376,12 @@ type
   private
     FCancelled: Boolean;
     procedure SourceCancelled(Sender: TObject);
+    { Render the drag's preview into a fresh compositor drag-icon surface, or
+      nil if there is no preview to draw. Caller frees it after the drag. }
+    function  BuildDragIcon: TfpgwDragIcon;
   public
     function Execute(const ADropActions: TfpgDropActions = [daCopy]; const ADefaultAction: TfpgDropAction = daCopy): TfpgDropAction; override;
+    function UsesPlatformDragIcon: Boolean; override;
   end;
 
   { TfpgWaylandDrop — incoming drop target. One instance lives on the
@@ -428,7 +432,8 @@ implementation
 uses
   fpg_cmdlineparams, fpg_main, ctypes, fpg_widget,
   fpg_stringutils, fpg_popupwindow, variants,
-  fpg_wayland_decorations, fpg_wayland_buffer_manager, agg_basics, process;
+  fpg_wayland_decorations, fpg_wayland_buffer_manager, fpg_hybrid_canvas,
+  agg_basics, process;
 
 type
   { Reaches TfpgApplication.WaitWindowMessage (protected) so a blocking drag can
@@ -452,6 +457,38 @@ begin
   if daMove in AActions then Result.Move := True;
   if (daLink in AActions) or (daAsk in AActions) then Result.Copy := True;
   if Result.Value = 0 then Result.Copy := True;  { always offer something }
+end;
+
+{ Premultiply a straight-alpha BGRA8888 buffer in place. wl_shm ARGB is
+  premultiplied, but Agg renders straight alpha, so without this the
+  antialiased/transparent edges of a drag-icon preview fringe (over-bright). }
+procedure PremultiplyBGRA(AData: Pointer; AWidth, AHeight, AStride: Integer);
+var
+  y, x: Integer;
+  p: PByte;
+  a: Byte;
+begin
+  if AData = nil then
+    Exit;
+  for y := 0 to AHeight - 1 do
+  begin
+    p := PByte(AData) + y * AStride;
+    for x := 0 to AWidth - 1 do
+    begin
+      a := p[3];
+      if a = 0 then
+      begin
+        p[0] := 0; p[1] := 0; p[2] := 0;   { fully transparent -> zero RGB }
+      end
+      else if a <> 255 then
+      begin
+        p[0] := (p[0] * a) div 255;
+        p[1] := (p[1] * a) div 255;
+        p[2] := (p[2] * a) div 255;
+      end;
+      Inc(p, 4);
+    end;
+  end;
 end;
 
 { Map a single negotiated wl dnd-action bit back to an fpGUI drop action. }
@@ -1985,6 +2022,53 @@ begin
   FCancelled := True;
 end;
 
+function TfpgWaylandDrag.UsesPlatformDragIcon: Boolean;
+begin
+  { The compositor moves our drag-icon surface with the pointer, so the
+    cross-platform preview window must not also be shown. }
+  Result := True;
+end;
+
+function TfpgWaylandDrag.BuildDragIcon: TfpgwDragIcon;
+var
+  lShell: TfpgDrag;
+  lPaint: TfpgDragPaintEvent;
+  lSize: TfpgSize;
+  lCanvas: THybridCanvas;
+begin
+  Result := nil;
+  { The preview painter + size live on the cross-platform shell (our Owner).
+    Only the OnPaintPreview path is rendered offscreen for now; child-widget
+    previews fall back to no icon. }
+  if not (Owner is TfpgDrag) then
+    Exit;
+  lShell := TfpgDrag(Owner);
+  lPaint := lShell.OnPaintPreview;
+  if not Assigned(lPaint) then
+    Exit;
+  lSize := lShell.PreviewSize;
+  if (lSize.W <= 0) or (lSize.H <= 0) then
+    Exit;
+
+  Result := TfpgwDragIcon.Create(WApplication.Display, lSize.W, lSize.H);
+  { Render the preview into the icon's shm buffer via an offscreen hybrid canvas
+    (the same THybridCanvas the window would use, pointed at our buffer). }
+  lCanvas := THybridCanvas.Create(TfpgWidget(FSource));
+  try
+    { Match the font the preview size was computed with (the source widget's),
+      so text in the preview renders at the expected metrics. }
+    if Assigned(FSource) and Assigned(TfpgWidget(FSource).Canvas.Font) then
+      lCanvas.SetFont(TfpgWidget(FSource).Canvas.Font);
+    lCanvas.BeginDrawToBuffer(Result.Data, Result.Width, Result.Height, Result.Stride);
+    lPaint(lShell, TfpgCanvas(lCanvas));
+    lCanvas.EndDrawToBuffer;
+    { Agg renders straight alpha; wl_shm wants premultiplied. }
+    PremultiplyBGRA(Result.Data, Result.Width, Result.Height, Result.Stride);
+  finally
+    lCanvas.Free;
+  end;
+end;
+
 function TfpgWaylandDrag.Execute(const ADropActions: TfpgDropActions;
   const ADefaultAction: TfpgDropAction): TfpgDropAction;
 var
@@ -1993,6 +2077,7 @@ var
   item: TfpgMimeDataItem;
   s: String;
   origin: TfpgwWindow;
+  lIcon: TfpgwDragIcon;
 begin
   Result := daIgnore;
   if not Assigned(FMimeData) or (FMimeData.Count = 0) then
@@ -2003,6 +2088,8 @@ begin
   origin := TfpgWaylandWindow(FSource.Window).WinHandle;
   if not Assigned(origin) then
     Exit;
+
+  lIcon := nil;
 
   src := WApplication.Display.CreateDataSource;
   for i := 0 to FMimeData.Count - 1 do
@@ -2026,7 +2113,16 @@ begin
   FDragging := True;
   uActiveWaylandDrag := Self;
   try
-    WApplication.Display.StartDrag(src, origin);
+    { Build the drag-icon surface (preview) before start_drag; paint it now, but
+      commit only AFTER start_drag has given the surface the drag-icon role. }
+    lIcon := BuildDragIcon;
+    if Assigned(lIcon) then
+      WApplication.Display.StartDrag(src, origin, lIcon.Surface)
+    else
+      WApplication.Display.StartDrag(src, origin);
+    if Assigned(lIcon) then
+      lIcon.Commit(0, 0);   { hotspot 0,0: icon top-left at the pointer }
+
     { Pump until the source is done. cancelled FREES src (don't read it after),
       so test FCancelled FIRST — boolean eval is short-circuit under -Mobjfpc. }
     while not (FCancelled or src.DndFinished) do
@@ -2038,6 +2134,7 @@ begin
       src.Free;   { finished path: the binding does not free the source }
     end;
   finally
+    lIcon.Free;   { compositor released the drag-icon role on drag end }
     uActiveWaylandDrag := nil;
     FDragging := False;
     if Assigned(FSource) then

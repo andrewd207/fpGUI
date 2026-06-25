@@ -3640,7 +3640,11 @@ begin
     raise Exception.Create(ClassName + ': No Source window was specified before starting the drag');
   if ADropActions = [] then
     raise Exception.Create(ClassName + ': No Drop Action was specified');
-  if Assigned(FOnPaintPreview) or TfpgDNDWindow(FPreviewWin).HasWidgetChildren then
+  { Skip the cross-platform preview window when the backend draws its own drag
+    icon (Wayland's compositor-moved drag-icon surface), else it would show a
+    second, frozen copy. }
+  if (not FPlatform.UsesPlatformDragIcon)
+  and (Assigned(FOnPaintPreview) or TfpgDNDWindow(FPreviewWin).HasWidgetChildren) then
     TfpgDNDWindow(FPreviewWin).Show(FPreviewSize);
   Result := FPlatform.Execute(ADropActions, ADefaultAction);
 end;
