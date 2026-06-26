@@ -1072,8 +1072,15 @@ begin
       if WindowType = wtModalForm then
       begin
         lModalParent := nil;
-        if Assigned(fpgApplication.PrevModalForm) then
-          lModalParent := TfpgWaylandWindow(fpgApplication.PrevModalForm)
+        { PrevModalForm/MainForm are the form WIDGETS; the backend window we need
+          for set_parent is their .Window (a TfpgWaylandWindow), a separate object
+          in the runtime-backend split. PrevModalForm's declared TfpgWindowBase is
+          a stale signature — the real object is a TfpgWidget, so reach .Window via
+          a TfpgWidgetBase cast. Casting the form straight to TfpgWaylandWindow
+          reads a garbage WinHandle and crashes in SetParent. }
+        if Assigned(fpgApplication.PrevModalForm)
+        and Assigned(TfpgWidgetBase(fpgApplication.PrevModalForm).Window) then
+          lModalParent := TfpgWaylandWindow(TfpgWidgetBase(fpgApplication.PrevModalForm).Window)
         else if Assigned(fpgApplication.MainForm)
             and Assigned(fpgApplication.MainForm.Window) then
           lModalParent := TfpgWaylandWindow(fpgApplication.MainForm.Window);

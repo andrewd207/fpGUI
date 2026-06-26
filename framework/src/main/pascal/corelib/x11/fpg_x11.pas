@@ -2812,6 +2812,7 @@ var
   IconPixmap: TPixmap;
   WMHints: PXWMHints;
   IsToplevel: Boolean;
+  lModalWidget: TfpgWidgetBase;
 begin
   if HandleIsValid then
     Exit; //==>
@@ -2935,8 +2936,15 @@ begin
     if IsToplevel then
     begin
       lmwh := 0;
-      if fpgApplication.PrevModalForm <> nil then
-        lmwh := TfpgX11Window(fpgApplication.PrevModalForm).WinHandle
+      { PrevModalForm is the form WIDGET; the backend window holding WinHandle is
+        its .Window (a separate TfpgX11Window in the runtime-backend split). Its
+        declared TfpgWindowBase is a stale signature — the real object is a
+        TfpgWidget, so reach .Window via a TfpgWidgetBase cast (mirroring the
+        MainForm branch below). Casting the form straight to TfpgX11Window reads a
+        garbage WinHandle and sets a bogus transient-for hint. }
+      lModalWidget := TfpgWidgetBase(fpgApplication.PrevModalForm);
+      if (lModalWidget <> nil) and (lModalWidget.Window <> nil) then
+        lmwh := TfpgX11Window(lModalWidget.Window).WinHandle
       {else if AParent <> nil then
         lmwh := TfpgX11Window(AParent).WinHandle}
 { 2011-03-24: Graeme Geldenhuys
