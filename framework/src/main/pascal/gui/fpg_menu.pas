@@ -847,7 +847,7 @@ begin
     op := OpenerPopup;
     while op <> nil do
     begin
-      if op.Window.HasHandle then
+      if op.WindowAllocated and op.Window.HasHandle then
         op.Close;
       op := op.OpenerPopup;
     end;
@@ -943,7 +943,7 @@ begin
 
   mi := VisibleItem(FFocusItem);
   if (mi <> nil) and (not MenuFocused) and (mi.SubMenu <> nil)
-      and mi.SubMenu.Window.HasHandle then
+      and mi.SubMenu.WindowAllocated and mi.SubMenu.Window.HasHandle then
     mi.SubMenu.Close
   else
     DoSelect;
@@ -1449,12 +1449,12 @@ begin
   end;
   inherited Close;
   uFocusedPopupMenu := OpenerPopup;
-  if (uFocusedPopupMenu <> nil) and uFocusedPopupMenu.Window.HasHandle then
+  if (uFocusedPopupMenu <> nil) and uFocusedPopupMenu.WindowAllocated and uFocusedPopupMenu.Window.HasHandle then
     uFocusedPopupMenu.RePaint;
 
-  if (OpenerMenuBar <> nil) and OpenerMenuBar.Window.HasHandle then
+  if (OpenerMenuBar <> nil) and OpenerMenuBar.WindowAllocated and OpenerMenuBar.Window.HasHandle then
   begin
-    if (OpenerPopup = nil) or not OpenerPopup.Window.HasHandle then
+    if (OpenerPopup = nil) or not OpenerPopup.WindowAllocated or not OpenerPopup.Window.HasHandle then
     begin
       OpenerMenuBar.DeActivateMenu;
     end;
