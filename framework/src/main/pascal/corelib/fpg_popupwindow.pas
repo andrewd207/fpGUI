@@ -53,6 +53,7 @@ type
     procedure   DoAllocateWindowHandle; override;
   public
     constructor Create(AOwner: TComponent); override;
+    destructor  Destroy; override;
     procedure   ShowAt(AWidget: TfpgWidget; x, y: TfpgCoord; const ACanAdjustPos: boolean = false); overload;
     procedure   ShowAt(x, y: TfpgCoord); overload;
     procedure   Close; virtual;
@@ -323,6 +324,14 @@ begin
   Parent := nil;
   FPopupFrame := False;
   FIsContainer := True;
+end;
+
+destructor TfpgPopupWindow.Destroy;
+begin
+  // Ensure we never leave a dangling pointer in the global popup list when a
+  // popup is freed while still shown (Close is the only other unlink site).
+  PopupListRemove(self);
+  inherited Destroy;
 end;
 
 procedure TfpgPopupWindow.ShowAt(AWidget: TfpgWidget; x, y: TfpgCoord; const ACanAdjustPos: boolean);
