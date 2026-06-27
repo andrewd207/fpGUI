@@ -2762,6 +2762,14 @@ begin
     move/resize grab; suppress the matching deactivate/activate so the window
     keeps its focus appearance during the operation. }
   FSuppressDeactivate := True;
+  { Handing the pointer to the compositor (xdg_toplevel move/resize, or a popup
+    grab) means it owns the pointer until the drag ends and the matching button
+    RELEASE is delivered to the compositor, not to us — so SendMouseButtonMessage
+    never runs Exclude() and the pressed button would stay stuck in FShiftState.
+    A stuck ssLeft then makes every subsequent motion look like a held-button
+    drag (text editors select-follow the cursor with no press). Drop the mouse
+    buttons now; keyboard modifiers live in FKeyboard.ModState and are untouched. }
+  FShiftState := FShiftState - [ssLeft, ssRight, ssMiddle];
 end;
 
 function TfpgWaylandApplication.DoGetFontFaceList: TStringList;
