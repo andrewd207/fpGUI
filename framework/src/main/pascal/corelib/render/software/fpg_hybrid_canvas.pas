@@ -160,6 +160,14 @@ end;
 
 destructor THybridCanvas.Destroy;
 begin
+  { THybridCanvas descends from TfpgCanvasBase, not TfpgCanvas, so the
+    caret-unset safeguard in TfpgCanvas.Destroy never runs for us. Without
+    this, freeing a focused widget's canvas leaves fpgCaret.FCanvas dangling
+    and the next blink-timer InvertCaret dereferences freed memory (SIGSEGV
+    in BeginDraw). UnSetCaret only pointer-compares + nils, so the hard cast
+    of a non-TfpgCanvas instance is safe. }
+  if Assigned(fpgCaret) then
+    fpgCaret.UnSetCaret(TfpgCanvas(Self));
   if Assigned(FBufferManager) then
   begin
     FBufferManager.FreeBuffer;
