@@ -302,6 +302,12 @@ type
     procedure SetupKeymap(Sender: TObject; AFormat: TWlKeyboard.TKeymapFormat; AFileDesc: LongInt; ASize: LongInt);
     procedure UpdateKeyState(Sender: TObject; AModsDepressed, AModsLatched, AModsLocked, AGroup: LongWord);
     procedure StartRepeatDelay(AKeyCode: LongWord);
+    function GetRealShiftState: TShiftState;
+    { The ShiftState an X11 app's events would carry: the real state (above) with
+      NumLock dropped. X11's ConvertShiftState deliberately omits ssNum because
+      NumLock is usually left on and would poison every strict ShiftState
+      comparison (a widget checking for [ssCtrl] never matches [ssCtrl, ssNum]). }
+    function ShiftStateForEvent: TShiftState;
   protected
     procedure   DoFlush; override;
     function    DoGetFontFaceList: TStringList; override;
@@ -340,6 +346,13 @@ type
 
 
     property Display: TfpgwDisplay read FDisplay;
+
+    { The full, unfiltered modifier state: keyboard modifiers and lock keys
+      (incl. NumLock and CapsLock) merged with the currently-held mouse buttons.
+      Unlike the state delivered with input events (which drops NumLock for X11
+      parity), this reports the locks as they really are — for e.g. showing a
+      "Caps Lock is on" warning on a password prompt. }
+    property RealShiftState: TShiftState read GetRealShiftState;
 
     { Pick a built-in client-side decoration button style. Setting this replaces
       the active drawer with a fresh built-in instance (any previously assigned
@@ -2361,12 +2374,26 @@ begin
   Result := (Length(ACh) >= 1) and (ACh[1] >= #32) and (ACh[1] <> #127);
 end;
 
+function TfpgWaylandApplication.GetRealShiftState: TShiftState;
+begin
+  { FShiftState holds the currently-pressed mouse buttons; FKeyboard.ModState
+    holds the keyboard modifiers and lock keys. Together they are the real,
+    complete state an X11 app would see — including NumLock/CapsLock. }
+  Result := FKeyboard.ModState + FShiftState;
+end;
+
+function TfpgWaylandApplication.ShiftStateForEvent: TShiftState;
+begin
+  { What events actually carry: the real state minus NumLock, for X11 parity. }
+  Result := GetRealShiftState - [ssNum];
+end;
+
 procedure TfpgWaylandApplication.KeyboardRepeatKeyTimer(Sender: TObject);
 var
   msgp: TfpgMessageParams;
   lKeyChar: UTF8String;
 begin
-  msgp.keyboard.shiftstate := FKeyboard.ModState;
+  msgp.keyboard.shiftstate := ShiftStateForEvent;
   msgp.keyboard.keycode := KeySymToKeycode(TKeyboardTimer(Sender).KeyCode);
   { Route to the focused window, same as a real press (posting to nil dropped
     the event). }
@@ -2454,7 +2481,7 @@ begin
 
 
   msgp.keyboard.keycode :=  KeySymToKeycode(lKeySym);
-  msgp.keyboard.shiftstate:=FKeyboard.ModState;
+  msgp.keyboard.shiftstate:=ShiftStateForEvent;
 
   fpgPostMessage(nil, Sender, msg, msgp);
   if msg = FPGM_KEYPRESS then
@@ -2544,7 +2571,7 @@ begin
   msgp.mouse.delta := Round(AValue / 2560.0);
   if (msgp.mouse.delta = 0) and (AValue <> 0) then
     if AValue > 0 then msgp.mouse.delta := 1 else msgp.mouse.delta := -1;
-  msgp.mouse.shiftstate := FShiftState;
+  msgp.mouse.shiftstate := ShiftStateForEvent;
 
   fpgPostMessage(nil, Sender, msg, msgp);
 
@@ -2605,7 +2632,7 @@ begin
   msgp.mouse.Buttons:=lButton;
   msgp.mouse.x:= lWin.FMousePos.X;
   msgp.mouse.y:= lWin.FMousePos.Y;
-  msgp.mouse.shiftstate:=FShiftState;
+  msgp.mouse.shiftstate:=ShiftStateForEvent;
 
   if (lWin.FMousePos.X<0)
   or (lWin.FMousePos.Y<0)
@@ -2672,7 +2699,7 @@ begin
   else
     msgp.mouse.Buttons    := 0;//
 
-  msgp.mouse.shiftstate := FShiftState;
+  msgp.mouse.shiftstate := ShiftStateForEvent;
 
   if (lWin.FMousePos.X<0)
   or (lWin.FMousePos.Y<0)
