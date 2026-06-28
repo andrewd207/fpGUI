@@ -720,8 +720,11 @@ begin
   FCanvas.Free;
   HandleHide;
 
-  if FInvalidated then
-    fpgDeleteMessagesForTarget(Self, FPGM_PAINT);
+  { Purge ALL pending messages addressed to this widget, not just paints.
+    Any message still queued for a widget being freed (input, resize, move,
+    or a paint when FInvalidated is false) would, on delivery, call Dispatch
+    on freed memory — a SIGSEGV in fpgDeliverMessage (msg.Dest.Dispatch). }
+  fpgDeleteMessagesForTarget(Self);
 
   if Parent <> nil then
   begin
