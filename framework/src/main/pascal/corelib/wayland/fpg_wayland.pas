@@ -1078,9 +1078,16 @@ begin
           a stale signature — the real object is a TfpgWidget, so reach .Window via
           a TfpgWidgetBase cast. Casting the form straight to TfpgWaylandWindow
           reads a garbage WinHandle and crashes in SetParent. }
+        { Prefer the previous modal (nested dialogs), then the form the user was
+          actually working in (LastActiveForm), and only then MainForm. Without
+          the LastActiveForm step a dialog raised from a secondary top-level form
+          would wrongly attach to MainForm. }
         if Assigned(fpgApplication.PrevModalForm)
         and Assigned(TfpgWidgetBase(fpgApplication.PrevModalForm).Window) then
           lModalParent := TfpgWaylandWindow(TfpgWidgetBase(fpgApplication.PrevModalForm).Window)
+        else if Assigned(fpgApplication.LastActiveForm)
+            and Assigned(fpgApplication.LastActiveForm.Window) then
+          lModalParent := TfpgWaylandWindow(fpgApplication.LastActiveForm.Window)
         else if Assigned(fpgApplication.MainForm)
             and Assigned(fpgApplication.MainForm.Window) then
           lModalParent := TfpgWaylandWindow(fpgApplication.MainForm.Window);

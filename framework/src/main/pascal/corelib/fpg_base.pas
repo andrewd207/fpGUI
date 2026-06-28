@@ -805,6 +805,7 @@ type
   TfpgApplicationBase = class(TfpgComponent, ICmdLineParams)
   private
     FMainForm: TfpgWidgetBase;
+    FLastActiveForm: TfpgWidgetBase;
     FTerminated: boolean;
     FCritSect: TCriticalSection;
     FWakeChannel: IWakeChannel;
@@ -880,6 +881,12 @@ type
     property    IsInitialized: boolean read FIsInitialized;
     property    TopModalForm: TfpgWidgetBase read GetTopModalForm;
     property    MainForm: TfpgWidgetBase read FMainForm write FMainForm;
+    { The last genuine top-level form (wtWindow) the user activated. Backends
+      use this as the transient-parent for a new modal dialog, so the dialog
+      attaches to the window the user is actually working in rather than always
+      falling back to MainForm. Updated in TfpgBaseForm.MsgActivate and cleared
+      in TfpgBaseForm.Destroy to avoid a dangling reference. }
+    property    LastActiveForm: TfpgWidgetBase read FLastActiveForm write FLastActiveForm;
     property    Terminated: boolean read FTerminated write FTerminated;
     property    OnIdle: TNotifyEvent read FOnIdle write FOnIdle;
     property    selection: TfpgClipboardBase read FSelection;

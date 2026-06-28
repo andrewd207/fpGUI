@@ -199,6 +199,12 @@ begin
   {$IFDEF GDEBUG}
   DebugLn(Classname + ' ' + Name + '.BaseForm - MsgActivate');
   {$ENDIF}
+  { Remember the active top-level form so a later modal dialog can attach to it
+    instead of always falling back to MainForm. Only record real top-level
+    windows — never popups or modal dialogs, which would defeat the purpose. }
+  if FWindowType = wtWindow then
+    fpgApplication.LastActiveForm := self;
+
   if (fpgApplication.TopModalForm = nil) or (fpgApplication.TopModalForm = self) then
   begin
     {$IFDEF GDEBUG}
@@ -294,6 +300,10 @@ end;
 destructor TfpgBaseForm.Destroy;
 begin
   fpgApplication.RemoveWindowFromModalStack(Self);
+  { Don't leave LastActiveForm pointing at a freed form — a subsequent modal
+    would otherwise read a dangling pointer when choosing its transient parent. }
+  if fpgApplication.LastActiveForm = Self then
+    fpgApplication.LastActiveForm := nil;
   inherited Destroy;
 end;
 

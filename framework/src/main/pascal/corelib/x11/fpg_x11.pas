@@ -2955,6 +2955,12 @@ begin
 //      else if FocusRootWidget <> nil then
 //        lmwh := TfpgX11Window(FocusRootWidget.Window).WinHandle // <-- alienwindows
 ////        lmwh := TfpgX11Window(FocusRootWidget).WinHandle
+      { Attach to the form the user was actually working in before falling back
+        to MainForm — otherwise a dialog raised from a secondary top-level form
+        wrongly becomes transient-for MainForm. }
+      else if (fpgApplication.LastActiveForm <> nil)
+          and (fpgApplication.LastActiveForm.Window <> nil) then
+        lmwh := TfpgX11Window(fpgApplication.LastActiveForm.Window).WinHandle
       else if fpgApplication.MainForm <> nil then
         lmwh := TfpgX11Window(fpgApplication.MainForm.Window).WinHandle;
       if lmwh <> 0 then
