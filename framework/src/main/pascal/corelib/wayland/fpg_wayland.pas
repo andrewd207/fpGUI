@@ -2808,37 +2808,43 @@ end;
 
 function TfpgWaylandApplication.DoGetFontFaceList: TStringList;
 var
-  config: PFcConfig;
   pat: PFcPattern;
   os: PFcObjectSet;
   fs: PFcFontSet;
   font: PFcPattern;
-  f, style, family: PFcChar8;
+  family: PFcChar8;
   i: Integer;
 begin
+  { Return de-duplicated *family* names (the core name) only, not every
+    weight/style variant (Thin, Bold, ExtraBold, ...). Bold/italic/etc. are
+    applied via the font dialog's attribute checkboxes, which fpGUI appends to
+    the descriptor as ':'-separated tokens. Mirrors what the X11 backend's
+    XftListFonts(FC_FAMILY) enumeration already returns. }
   Result := TStringList.Create;
+  Result.Sorted := True;
+  Result.Duplicates := dupIgnore;
 
-  config := FcInitLoadConfigAndFonts();
+  { Reuse the config loaded once at startup; FcFontList does not take ownership
+    of it, so there is nothing to release here. }
+  if not Assigned(FFontConfig) then
+    Exit;
+
   pat := FcPatternCreate();
-  os := FcObjectSetBuild (pcchar(PChar(FC_FAMILY)), [FC_STYLE, FC_LANG, FC_FILE, nil]);
-  fs := FcFontList(config, pat, os);
+  os := FcObjectSetBuild(pcchar(PChar(FC_FAMILY)), [nil]);
+  fs := FcFontList(FFontConfig, pat, os);
 
-  for i := 0 to fs^.nfont -1 do
-  begin
-    font := fs^.fonts[i];
-    if  (FcPatternGetString(font, pcchar(PChar(FC_FILE)), 0, @f) = FcResultMatch)
-    and (FcPatternGetString(font,  pcchar(PChar(FC_FAMILY)), 0, @family) = FcResultMatch)
-    and (FcPatternGetString(font,  pcchar(PChar(FC_STYLE)), 0, @style) = FcResultMatch)
-    then
+  if Assigned(fs) then
+    for i := 0 to fs^.nfont - 1 do
     begin
-      //printf("Filename: %s (family %s, style %s)\n", file, family, style);
-      REsult.Add(family+' '+style);
-      //WriteLn(family+' '+style);
+      font := fs^.fonts[i];
+      if FcPatternGetString(font, pcchar(PChar(FC_FAMILY)), 0, @family) = FcResultMatch then
+        Result.Add(family);
     end;
-  end;
 
   if Assigned(fs) then
     FcFontSetDestroy(fs);
+  FcObjectSetDestroy(os);
+  FcPatternDestroy(pat);
 end;
 
 procedure TfpgWaylandApplication.DoWaitWindowMessage(atimeoutms: integer);
