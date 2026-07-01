@@ -247,6 +247,7 @@ type
     procedure   DoReleaseWindowHandle; override;
     procedure   DoRemoveWindowLookup; override;
     procedure   DoSetWindowAttributes(const AOldAtributes, ANewAttributes: TWindowAttributes; const AForceAll: Boolean); override;
+    procedure   DoUpdateTransientParent; override;
     procedure   DoSetWindowVisible(const AValue: Boolean); override;
     function    HandleIsValid: boolean; override;
     procedure   DoSetWindowTitle(const ATitle: string); override;
@@ -3381,6 +3382,19 @@ begin
       end;
     end;
   end;
+end;
+
+procedure TfpgX11Window.DoUpdateTransientParent;
+begin
+  if not HasHandle then
+    Exit; // ==>
+  { WM_TRANSIENT_FOR keeps this toplevel stacked above the named window (and off
+    the taskbar), without making it modal. Clearing it drops the relationship. }
+  if FTransientParentWindow <> nil then
+    XSetTransientForHint(xapplication.display, FWinHandle,
+      TfpgX11Window(FTransientParentWindow).WinHandle)
+  else
+    XSetTransientForHint(xapplication.display, FWinHandle, X.None);
 end;
 
 type

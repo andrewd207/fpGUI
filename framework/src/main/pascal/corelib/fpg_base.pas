@@ -690,6 +690,7 @@ type
     FWindowOpacity: Single;
     FDropableWidgets: TFPList;
     LastMousePos: TfpgPoint; // point in the native window
+    procedure   SetTransientParentWindow(AValue: TfpgWindowBase);
     function    GetHeight: TfpgCoord;
     function    GetLeft: TfpgCoord;
     function    GetPrimaryWidget: TfpgWidgetBase;
@@ -706,6 +707,7 @@ type
     FMouseCursor: TMouseCursor;
     FWindowType: TWindowType;
     FWindowAttributes: TWindowAttributes;
+    FTransientParentWindow: TfpgWindowBase;   { see TransientParentWindow property }
     FMouseCursorIsDirty: Boolean;
     FWindowState: TfpgWindowState;
     function    HandleIsValid: boolean; virtual; abstract;
@@ -727,6 +729,11 @@ type
     procedure   ReleaseWindowHandle;
     procedure   SetWindowTitle(const ATitle: string); virtual;
     procedure   SetWindowAttributes(const AAttributes: TWindowAttributes); virtual;
+    { Apply the current TransientParentWindow to the live native window. Called by
+      the setter once the handle exists (and by backends at allocation time).
+      Backend-specific (X11 XSetTransientForHint / Wayland xdg set_parent); the
+      base does nothing so backends that don't implement it are harmless. }
+    procedure   DoUpdateTransientParent; virtual;
     // alien windows methods
     procedure   DispatchMouseEvent(AX, AY: TfpgCoord; var msg: TfpgMessageRec);
     procedure   DispatchKeyEvent(var msg: TfpgMessageRec);
@@ -768,6 +775,12 @@ type
     property    CurrentWidget: TfpgWidgetBase read FCurrentWidget write SetCurrentWidget;
     property    WindowType: TWindowType read FWindowType write FWindowType;
     property    WindowAttributes: TWindowAttributes read FWindowAttributes write SetWindowAttributes;
+    { The top-level native window this window stays stacked above (transient-for on
+      X11 / xdg set_parent on Wayland), or nil for none. Set it from the owning
+      form once its own window is allocated (e.g. in DoWindowAllocated) — the
+      setter applies it live. Lets a form float above a specific, possibly
+      unfocused window without being modal. Nil for the ordinary 99%. }
+    property    TransientParentWindow: TfpgWindowBase read FTransientParentWindow write SetTransientParentWindow;
     property    WindowTitle: string write SetWindowTitle;
     property    WindowState: TfpgWindowState read GetWindowState write SetWindowState default wsNormal;
     property    WindowOpacity: Single read FWindowOpacity write SetWindowOpacity default 1.0;
@@ -2538,6 +2551,20 @@ begin
     Exit; // ==>
 
   DoSetWindowAttributes(OldAttrs, AAttributes, False);
+end;
+
+procedure TfpgWindowBase.SetTransientParentWindow(AValue: TfpgWindowBase);
+begin
+  if FTransientParentWindow = AValue then
+    Exit; // ==>
+  FTransientParentWindow := AValue;
+  if HasHandle then
+    DoUpdateTransientParent;   { apply live; else the backend applies at allocation }
+end;
+
+procedure TfpgWindowBase.DoUpdateTransientParent;
+begin
+  // backends override to set the transient-for / xdg parent relationship
 end;
 
 procedure TfpgWindowBase.DispatchMouseEvent(AX, AY: TfpgCoord; var msg: TfpgMessageRec);

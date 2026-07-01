@@ -157,6 +157,10 @@ type
     function    FindFocusWidget(startwg: TfpgWidget; direction: TFocusSearchDirection): TfpgWidget;
     procedure   HandleAlignments(const dwidth, dheight: TfpgCoord); virtual;
     procedure   HandleShow; virtual;
+    { The native window backing this widget has just been allocated but is not yet
+      mapped. Override to push state onto Window that it cannot derive from the
+      widget itself (e.g. a form naming its TransientParentWindow). Empty default. }
+    procedure   DoWindowAllocated; virtual;
     procedure   InternalHandleShow; virtual;
     procedure   HandleHide; virtual;
     procedure   RePaint; virtual;
@@ -1097,9 +1101,16 @@ begin
   if DropHandler <> nil then
     Window.AddDropableWidget(Self);
 
+  DoWindowAllocated;
+
   for i := 0 to ComponentCount-1 do
     if Components[i].InheritsFrom(TfpgWidget) then
       fpgSendMessage(msg.Sender, Components[i], FPGM_WINDOW_ALLOCATED);
+end;
+
+procedure TfpgWidget.DoWindowAllocated;
+begin
+  // override to configure the freshly-allocated native window
 end;
 
 function TfpgWidget.GetDefaultDropHandler: TfpgDropHandler;

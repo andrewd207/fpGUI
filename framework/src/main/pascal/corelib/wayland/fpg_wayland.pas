@@ -100,6 +100,7 @@ type
     procedure   DoReleaseWindowHandle; override;
     procedure   DoRemoveWindowLookup; override;
     procedure   DoSetWindowAttributes(const AOldAtributes, ANewAttributes: TWindowAttributes; const AForceAll: Boolean); override;
+    procedure   DoUpdateTransientParent; override;
     procedure   DoSetWindowVisible(const AValue: Boolean); override;
     function    HandleIsValid: boolean; override;
     procedure   DoSetWindowTitle(const ATitle: string); override;
@@ -1033,6 +1034,7 @@ begin
       reliable predictor (mutter/GNOME doesn't, so it stays CSD). The actual
       grant is confirmed below; on the rare mismatch we still fall back to CSD. }
     if (WindowType in [wtWindow, wtModalForm])
+    and not (waBorderless in FWindowAttributes)
     and not lDisplay.Display.SupportsServerSideDecorations then
     begin
       Inc(lHeight, TfpgWaylandDecorator.BorderHeightIncrease);
@@ -1060,19 +1062,30 @@ begin
     if WindowType in [wtWindow, wtModalForm] then
     begin
       FWinHandle.SurfaceShell.SetTitle(FWindowTitle);
-      { Ask the compositor to draw native decorations. Returns True only if it
-        actually agrees (KDE/KWin); GNOME and other CSD-only compositors return
-        False and we draw our own frame. }
-      FUsingServerDecorations := FWinHandle.SurfaceShell.SetServerSideDecorations;
-      if not FUsingServerDecorations then
+      if waBorderless in FWindowAttributes then
       begin
+        { Borderless: take the client-side-decoration mode but draw nothing — no
+          decorator, zero insets. The compositor adds no frame and neither do we,
+          so the surface is exactly the content (e.g. a toast/bubble). }
         FWinHandle.SurfaceShell.SetClientSideDecorations;
-        WApplication.DecorationDrawer.GetInsets(FInsetLeft, FInsetTop, FInsetRight, FInsetBottom);
-        FDecor := TfpgWaylandDecorator.Create(Self, FWinHandle);
-        { Expose the content origin so child popups (menus) anchor to the content,
-          not over our client-side frame. }
-        FWinHandle.ContentOffsetX := FInsetLeft;
-        FWinHandle.ContentOffsetY := FInsetTop;
+        FUsingServerDecorations := False;
+      end
+      else
+      begin
+        { Ask the compositor to draw native decorations. Returns True only if it
+          actually agrees (KDE/KWin); GNOME and other CSD-only compositors return
+          False and we draw our own frame. }
+        FUsingServerDecorations := FWinHandle.SurfaceShell.SetServerSideDecorations;
+        if not FUsingServerDecorations then
+        begin
+          FWinHandle.SurfaceShell.SetClientSideDecorations;
+          WApplication.DecorationDrawer.GetInsets(FInsetLeft, FInsetTop, FInsetRight, FInsetBottom);
+          FDecor := TfpgWaylandDecorator.Create(Self, FWinHandle);
+          { Expose the content origin so child popups (menus) anchor to the content,
+            not over our client-side frame. }
+          FWinHandle.ContentOffsetX := FInsetLeft;
+          FWinHandle.ContentOffsetY := FInsetTop;
+        end;
       end;
       { Apply the initial resize constraints (fixed vs sizeable, Min/Max). }
       ApplyResizeConstraints;
@@ -1150,6 +1163,20 @@ begin
     resizes. Other attributes (waFullScreen, waStayOnTop, ...) are not yet
     mapped on Wayland. }
   ApplyResizeConstraints;
+end;
+
+procedure TfpgWaylandWindow.DoUpdateTransientParent;
+begin
+  if not HasHandle then
+    Exit; // ==>
+  { xdg_toplevel.set_parent keeps this surface stacked above its parent — the same
+    primitive the modal path uses. There is no client-controlled desktop-global
+    always-on-top on Wayland, so above-parent is the correct (and only) mapping.
+    SetParent(nil) unparents (the binding handles nil explicitly). }
+  if FTransientParentWindow <> nil then
+    FWinHandle.SurfaceShell.SetParent(TfpgWaylandWindow(FTransientParentWindow).WinHandle)
+  else
+    FWinHandle.SurfaceShell.SetParent(nil);
 end;
 
 procedure TfpgWaylandWindow.DoSetWindowVisible(const AValue: Boolean);
