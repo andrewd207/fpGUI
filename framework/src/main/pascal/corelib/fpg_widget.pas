@@ -749,6 +749,15 @@ begin
     if not HasOwnWindow and Visible then
       Parent.Invalidate;
   end;
+
+  { FindKeyboardFocus dereferences the global FocusRootWidget on every key event.
+    It is set to a popup on open and restored on PopupListRemove, but a popup
+    freed without a clean Close (or any widget that became the root) would leave
+    this dangling -> SIGSEGV in FindKeyboardFocus. Clear it here, mirroring the
+    Parent.ActiveWidget guard above. }
+  if FocusRootWidget = self then
+    FocusRootWidget := nil;
+
   if Assigned(Window) then
     Window.NotifyWidgetDestroying(Self);
 
