@@ -84,6 +84,12 @@ type
     FArmedButton: TfpgwTitleButton;  { button pressed but not yet released (GTK-style) }
     FLastTitleClickTime: LongWord;   { for titlebar double-click detection }
     FSizeable: Boolean;     { waSizeable: allow interactive resize (else fixed) }
+    { Set when this window was realized WITH a parent widget: it is a
+      wl_subsurface (an embedded child surface), not a toplevel. It has no
+      decorations/title, is clipped to the parent, and is positioned via
+      wl_subsurface.set_position relative to the parent surface. }
+    FIsSubSurface: Boolean;
+    FSubParent: TfpgWaylandWindow;  { parent backend window (to commit subsurface position) }
     procedure DecoratorConfigure(Sender: TObject; AEdges: LongWord; AWidth,
       AHeight: LongInt);
     procedure DecoratorPaint(Sender: TObject);
@@ -104,6 +110,9 @@ type
     procedure   DoSetWindowVisible(const AValue: Boolean); override;
     function    HandleIsValid: boolean; override;
     procedure   DoSetWindowTitle(const ATitle: string); override;
+    { Push this subsurface's fpGUI Left/Top to the compositor (set_position +
+      parent commit). No-op unless the window is a subsurface. }
+    procedure   RepositionSubSurface;
     procedure   DoMoveWindow(const x: TfpgCoord; const y: TfpgCoord); override;
     function    DoWindowToScreen(ASource: TfpgWindowBase; const AScreenPos: TPoint): TPoint; override;
     procedure   DoUpdateWindowPosition; override;
@@ -994,7 +1003,16 @@ begin
   if FWinHandle = nil then
   begin
     if Assigned(AParent) then
-      lParentWin := TfpgWaylandWindow(AParent.Window).WinHandle;
+    begin
+      { A parent at realize time means the compositor makes this a wl_subsurface
+        (see TfpgwWindow.Create): an embedded, decorationless child surface
+        positioned relative to the parent. Remember the parent backend window so
+        we can commit it when repositioning (subsurface position is latched on
+        the PARENT surface's commit). }
+      FSubParent := TfpgWaylandWindow(AParent.Window);
+      lParentWin := FSubParent.WinHandle;
+      FIsSubSurface := True;
+    end;
     // wayland needs a window that the popup is positioned relative to
     if WindowType = wtPopup then
     begin
@@ -1034,6 +1052,7 @@ begin
       reliable predictor (mutter/GNOME doesn't, so it stays CSD). The actual
       grant is confirmed below; on the rare mismatch we still fall back to CSD. }
     if (WindowType in [wtWindow, wtModalForm])
+    and not FIsSubSurface
     and not (waBorderless in FWindowAttributes)
     and not lDisplay.Display.SupportsServerSideDecorations then
     begin
@@ -1059,7 +1078,19 @@ begin
       FWinHandle.OnPopupConfigure:=@SendPopupConfigure;
     end;
 
-    if WindowType in [wtWindow, wtModalForm] then
+    if FIsSubSurface then
+    begin
+      { A subsurface has no title/decorations and no configure handshake. Desync
+        it so its own buffer commits apply immediately (independent of the
+        parent's frame), then seed its position. wl_subsurface.set_position is
+        double-buffered on the PARENT surface, so commit the parent to latch it. }
+      FWinHandle.SurfaceShell.SubSurface.SetDesync;
+      FWinHandle.SurfaceShell.SubSurface.SetPosition(Left, Top);
+      if Assigned(FSubParent) and Assigned(FSubParent.WinHandle) then
+        FSubParent.WinHandle.SurfaceShell.Commit;
+    end;
+
+    if (WindowType in [wtWindow, wtModalForm]) and not FIsSubSurface then
     begin
       FWinHandle.SurfaceShell.SetTitle(FWindowTitle);
       if waBorderless in FWindowAttributes then
@@ -1212,10 +1243,26 @@ begin
   end;
 end;
 
+procedure TfpgWaylandWindow.RepositionSubSurface;
+begin
+  { A subsurface is client-positioned relative to its parent surface. The new
+    position is latched on the PARENT surface's commit, so set then commit it. }
+  if not (Assigned(FWinHandle) and Assigned(FWinHandle.SurfaceShell.SubSurface)) then
+    Exit;
+  FWinHandle.SurfaceShell.SubSurface.SetPosition(Left, Top);
+  if Assigned(FSubParent) and Assigned(FSubParent.WinHandle) then
+    FSubParent.WinHandle.SurfaceShell.Commit;
+end;
+
 procedure TfpgWaylandWindow.DoMoveWindow(const x: TfpgCoord; const y: TfpgCoord);
 var
   lXDGSurface: TfpgwXDGShellSurface;
 begin
+  if FIsSubSurface then
+  begin
+    RepositionSubSurface;
+    Exit;
+  end;
 
   // not really supported.... we can start a move from a button press...
   if FWinHandle.SurfaceShell is TfpgwXDGShellSurface then
@@ -1239,18 +1286,44 @@ begin
 end;
 
 procedure TfpgWaylandWindow.DoUpdateWindowPosition;
-var
-  lXDGSurface: TfpgwXDGShellSurface;
 begin
   //Writeln('window wants to update position');
   if not Assigned(FWinHandle) then
     Exit;
 
+  if FIsSubSurface then
+  begin
+    RepositionSubSurface;
+    Exit;
+  end;
+
   if FWinHandle.SurfaceShell is TfpgwXDGShellSurface then
   begin
-    //WriteLn(Format('DoUpdateWindowPosition = x%d:y%d[w%d:h%d]',[Left, Top, FWinHandle.GetWidth, FWinHandle.GetHeight]));
-    lXDGSurface := TfpgwXDGShellSurface(FWinHandle.SurfaceShell);
-    //lXDGSurface.Surface.SetWindowGeometry(0,0, FWinHandle.GetWidth, FWinHandle.GetHeight);
+    { A Wayland toplevel is CLIENT-sized: the compositor only sends a configure
+      for INTERACTIVE resizes, so a programmatic size change (widget resized from
+      code) must be pushed to the surface ourselves — otherwise the logical size
+      diverges from the real surface. Mirror the configure path (SendConfigure
+      Message): update the client size and force a full repaint. The next frame
+      allocates a buffer at the new size and commits it, which is what actually
+      resizes the surface — no unmap/recreate, no flicker. A pure move (size
+      unchanged) skips this and, as before, does not reposition a toplevel
+      (Wayland gives clients no say over toplevel position). }
+    { Only once the surface is mapped (first configure acked): before that the
+      window is still being sized by DoAllocateWindowHandle, and touching geometry
+      / forcing a paint here races the initial map. }
+    if FWinHandle.Configured
+    and (FSize.W > 0) and (FSize.H > 0)
+    and ((FSize.W <> FWinHandle.ClientWidth) or (FSize.H <> FWinHandle.ClientHeight)) then
+    begin
+      FWinHandle.SetClientSize(FSize.W, FSize.H);
+      TfpgWidget(Owner).InvalidateRect(fpgRect(0, 0, FSize.W, FSize.H));
+      { A programmatic resize is not driven by an incoming compositor event, so
+        the posted repaint would sit until the loop's next wake — up to the ~2s
+        idle timeout — and the window appears "stuck" until a stray input event
+        pumps it (the reported symptom). Nudge the event loop's self-pipe so the
+        next WaitEvent returns at once, delivering + presenting the new frame. }
+      lDisplay.Display.Wakeup;
+    end;
   end;
 end;
 
