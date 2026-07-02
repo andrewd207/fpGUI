@@ -3651,7 +3651,18 @@ begin
   if (not FPlatform.UsesPlatformDragIcon)
   and (Assigned(FOnPaintPreview) or TfpgDNDWindow(FPreviewWin).HasWidgetChildren) then
     TfpgDNDWindow(FPreviewWin).Show(FPreviewSize);
-  Result := FPlatform.Execute(ADropActions, ADefaultAction);
+  try
+    Result := FPlatform.Execute(ADropActions, ADefaultAction);
+  finally
+    { The drag is over. Tear the preview window down NOW rather than waiting for
+      the caller to free this TfpgDrag — TfpgDrag descends from TObject, so a
+      caller that forgets (or defers) the free would otherwise leave the preview
+      as a live, mapped X11 window that keeps receiving mouse/key events. That
+      lingering window is what produced ghost previews and drove crashes in the
+      focus/key path. Hiding here makes the preview resilient to caller misuse. }
+    if Assigned(FPreviewWin) then
+      TfpgDNDWindow(FPreviewWin).Hide;
+  end;
 end;
 
 

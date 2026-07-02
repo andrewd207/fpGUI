@@ -33,6 +33,7 @@ type
   public
     constructor Create(AOwner: TComponent; ADrag: TfpgDrag); reintroduce;
     procedure   Show(ASize: TfpgSize);
+    procedure   Hide;
     function    HasWidgetChildren: Boolean;
   end;
 
@@ -65,6 +66,18 @@ begin
   FVisible:=True;
   HandleShow;
   SetPosition(Left, Top, ASize.W, ASize.H);
+end;
+
+procedure TfpgDNDWindow.Hide;
+begin
+  if not FVisible then
+    Exit;
+  { HandleHide frees the native window and purges its queued messages, so once
+    the drag is over the preview stops being a live, mapped X11 window that can
+    still receive stray mouse/key events. Symmetric with Show's manual FVisible +
+    HandleShow (we bypass the Visible setter for the same reason Show does). }
+  HandleHide;
+  FVisible := False;
 end;
 
 function TfpgDNDWindow.HasWidgetChildren: Boolean;
