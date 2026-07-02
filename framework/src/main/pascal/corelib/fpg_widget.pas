@@ -667,7 +667,19 @@ begin
 end;
 
 procedure TfpgWidget.SetParent(const AValue: TfpgWidget);
+var
+  OldParent: TfpgWidget;
 begin
+  { Detaching (or reparenting) must clear the OLD parent's focus pointer if it
+    referenced us. Otherwise, once we are later freed, FActiveWidget dangles and
+    FindWidgetForKeyEvent walks freed memory on the next key event. The destructor
+    only guards this while Parent is still set (see Destroy), so a detach-then-free
+    (e.g. a widget pulled out of the tree before an async caFree) slips past it. }
+  OldParent := Parent;
+  if (OldParent <> nil) and (OldParent <> AValue)
+     and (OldParent.ActiveWidget = Self) then
+    OldParent.ActiveWidget := nil;
+
   inherited SetParent(AValue);
   if not HasOwnWindow then
   begin
