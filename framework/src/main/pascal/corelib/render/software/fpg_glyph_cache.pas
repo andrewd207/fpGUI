@@ -48,6 +48,8 @@ type
     EngPtr: Pointer;      { ^font_engine_freetype_int32; nil until loaded }
     CachePtr: Pointer;    { ^font_cache_manager }
     LoadedPx: double;     { pixel height currently loaded; -1 = not created }
+    PreferForEmoji: Boolean;  { a dedicated emoji font — preferred for
+                                pictographic codepoints over the primary face }
   end;
 
   TGlyphCache = class(TObject)
@@ -359,10 +361,13 @@ begin
   FCurrentFontDesc := desc;
 end;
 
-{ Candidate fallback font families, tried in order. Colour-emoji fonts come
+{ Candidate fallback font families, tried in order. Dedicated emoji fonts come
   first so pictographic codepoints render in colour; broad-coverage text
-  fonts follow for missing letters/symbols. }
+  fonts follow for missing letters/symbols. The first EMOJI_FAMILY_COUNT
+  entries are emoji fonts (preferred for emoji codepoints even when the
+  primary face has a monochrome glyph). }
 const
+  EMOJI_FAMILY_COUNT = 6;
   FALLBACK_FAMILIES: array[0..9] of string = (
     'Noto Color Emoji',
     'Apple Color Emoji',
@@ -374,6 +379,22 @@ const
     'DejaVu Sans',
     'Noto Sans',
     'FreeSans');
+
+{ True for codepoints that are normally rendered as emoji/pictographs. Being
+  generous here is safe: a preferred emoji font only wins if it actually
+  contains the glyph, otherwise routing falls through to the primary face. }
+function IsEmojiCodePoint(cp: Cardinal): Boolean;
+begin
+  Result :=
+    ((cp >= $1F000) and (cp <= $1FAFF)) or  { emoji/pictograph planes }
+    ((cp >= $2600)  and (cp <= $27BF))  or  { Misc Symbols + Dingbats }
+    ((cp >= $2300)  and (cp <= $23FF))  or  { Misc Technical (watch, hourglass) }
+    ((cp >= $2B00)  and (cp <= $2BFF))  or  { stars, arrows, geometric }
+    (cp = $20E3)  or                        { combining enclosing keycap }
+    (cp = $2934)  or (cp = $2935)  or       { curved arrows }
+    (cp = $3030)  or (cp = $303D)  or
+    (cp = $3297)  or (cp = $3299);
+end;
 
 procedure TGlyphCache.ResolveFallbacks;
 var
@@ -415,6 +436,7 @@ begin
           FFallbacks[n].EngPtr := nil;
           FFallbacks[n].CachePtr := nil;
           FFallbacks[n].LoadedPx := -1;
+          FFallbacks[n].PreferForEmoji := (i < EMOJI_FAMILY_COUNT);
           Inc(n);
         end;
       end;
@@ -457,7 +479,22 @@ function TGlyphCache.GlyphSource(ACodePoint: Cardinal): Pointer;
 var
   i: Integer;
 begin
-  { Primary face first. }
+  { For pictographic codepoints prefer a dedicated (colour) emoji font over
+    the primary face, which may only carry a monochrome outline for them. }
+  if IsEmojiCodePoint(ACodePoint) then
+  begin
+    ResolveFallbacks;
+    for i := 0 to High(FFallbacks) do
+      if FFallbacks[i].PreferForEmoji then
+      begin
+        EnsureFallbackLoaded(i);
+        if PFontEngine(FFallbacks[i].EngPtr)^.has_glyph(ACodePoint) then
+          Exit(FFallbacks[i].CachePtr);
+      end;
+    { No emoji font supplies it — fall through to the normal order. }
+  end;
+
+  { Primary face. }
   if PFontEngine(FEnginePtr)^.has_glyph(ACodePoint) then
     Exit(FCacheManagerPtr);
 
