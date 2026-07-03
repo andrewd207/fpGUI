@@ -93,6 +93,17 @@ const
   FT_LOAD_IGNORE_TRANSFORM = $0800;
   FT_LOAD_MONOCHROME =       $1000;
   FT_LOAD_LINEAR_DESIGN =    $2000;
+  FT_LOAD_COLOR =            $100000;  // load embedded colour bitmaps (CBDT/sbix/COLR) as BGRA
+
+  { FT_Pixel_Mode — value of FT_Bitmap.pixel_mode }
+  FT_PIXEL_MODE_NONE  = 0;
+  FT_PIXEL_MODE_MONO  = 1;
+  FT_PIXEL_MODE_GRAY  = 2;
+  FT_PIXEL_MODE_GRAY2 = 3;
+  FT_PIXEL_MODE_GRAY4 = 4;
+  FT_PIXEL_MODE_LCD   = 5;
+  FT_PIXEL_MODE_LCD_V = 6;
+  FT_PIXEL_MODE_BGRA  = 7;   // 32-bit premultiplied BGRA — colour glyphs
 
   ft_glyph_format_none      = $00000000;
   ft_glyph_format_composite = $636F6D70; //comp 099 111 109 112
@@ -174,6 +185,10 @@ type
  FT_Bitmap_Size = record
   height ,
   width  : FT_Short;
+
+  size   : FT_Pos;   // nominal size of the strike (26.6)
+  x_ppem ,
+  y_ppem : FT_Pos;   // horizontal/vertical ppem of the strike (26.6)
 
  end;
 
@@ -377,6 +392,8 @@ type
  function  FT_Done_Face(face : FT_Face_ptr ) : FT_Error; cdecl; external ft_lib name 'FT_Done_Face';
 
  function  FT_Select_Charmap(face : FT_Face_ptr; encoding : FT_Encoding ) : FT_Error; cdecl; external ft_lib name 'FT_Select_Charmap';
+
+ function  FT_Select_Size(face : FT_Face_ptr; strike_index : FT_Int ) : FT_Error; cdecl; external ft_lib name 'FT_Select_Size';
 
  function  FT_Get_Char_Index(face : FT_Face_ptr; charcode : FT_ULong ) : FT_UInt; cdecl; external ft_lib name 'FT_Get_Char_Index';
 

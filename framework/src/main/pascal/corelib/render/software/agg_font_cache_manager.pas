@@ -44,6 +44,7 @@ const
  glyph_data_mono    = 1;
  glyph_data_gray8   = 2;
  glyph_data_outline = 3;
+ glyph_data_color   = 4;   // raw BGRA colour bitmap (emoji); serialised by the FreeType engine
 
  block_size = 16384 - 16;
 

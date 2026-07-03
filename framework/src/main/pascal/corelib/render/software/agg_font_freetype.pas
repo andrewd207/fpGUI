@@ -98,6 +98,9 @@ type
    m_advance_y : double;
    m_affine    : trans_affine;
 
+   m_color_data : int8u_ptr;   // scratch buffer for a serialised BGRA colour glyph
+   m_color_size : unsigned;    // bytes allocated at m_color_data
+
    m_path16   : path_storage_int16;
    m_path32   : path_storage_int32;
    m_curves16 ,
@@ -150,6 +153,10 @@ type
 
    function  prepare_glyph(glyph_code : unsigned ) : boolean; virtual;
 
+   { True if glyph_code (a Unicode codepoint) maps to a real glyph in the
+     current face (FT_Get_Char_Index <> 0, i.e. not .notdef). }
+   function  has_glyph(glyph_code : unsigned ) : boolean; virtual;
+
    function  glyph_index : unsigned; virtual;
    function  data_size : unsigned; virtual;
    function  data_type : unsigned; virtual;
@@ -163,6 +170,7 @@ type
    function  flag32 : boolean; virtual;
 
   // private
+   procedure build_color_glyph;
    procedure update_char_size;
    procedure update_signature;
 
@@ -819,6 +827,9 @@ begin
  m_advance_x:=0.0;
  m_advance_y:=0.0;
 
+ m_color_data:=NIL;
+ m_color_size:=0;
+
  m_affine.Construct;
 
  m_path16.Construct;
@@ -864,6 +875,9 @@ begin
  agg_freemem(pointer(m_face_names ) ,m_max_faces * sizeof(face_name ) );
  agg_freemem(pointer(m_faces ) ,m_max_faces * sizeof(FT_Face_ptr ) );
  agg_freemem(pointer(m_signature.name ) ,m_signature.size );
+
+ if m_color_data <> NIL then
+  agg_freemem(pointer(m_color_data ) ,m_color_size );
 
  if m_library_initialized then
   FT_Done_FreeType(m_library );
@@ -1237,10 +1251,13 @@ begin
 
  m_glyph_index:=FT_Get_Char_Index(m_cur_face ,glyph_code );
 
+ { FT_LOAD_COLOR makes FreeType decode embedded colour bitmaps (CBDT/sbix)
+   into a premultiplied BGRA FT_Bitmap. It is harmless for monochrome
+   outline fonts, which continue to load as normal. }
  if m_hinting then
-  m_last_error:=FT_Load_Glyph(m_cur_face ,m_glyph_index ,FT_LOAD_DEFAULT {FT_LOAD_FORCE_AUTOHINT} )
+  m_last_error:=FT_Load_Glyph(m_cur_face ,m_glyph_index ,FT_LOAD_DEFAULT or FT_LOAD_COLOR {FT_LOAD_FORCE_AUTOHINT} )
  else
-  m_last_error:=FT_Load_Glyph(m_cur_face ,m_glyph_index ,FT_LOAD_NO_HINTING );
+  m_last_error:=FT_Load_Glyph(m_cur_face ,m_glyph_index ,FT_LOAD_NO_HINTING or FT_LOAD_COLOR );
 
  if m_last_error = 0 then
   case m_glyph_rendering of
@@ -1282,6 +1299,18 @@ begin
     begin
      m_last_error:=FT_Render_Glyph(m_cur_face.glyph ,FT_RENDER_MODE_NORMAL );
 
+     if (m_last_error = 0 ) and
+        (m_cur_face.glyph.bitmap.pixel_mode = char(FT_PIXEL_MODE_BGRA ) ) then
+      begin
+       { Colour glyph (emoji): FreeType gave us a premultiplied BGRA bitmap.
+         Scale it to the requested pixel size and cache it verbatim; the
+         gray8 coverage path does not apply. }
+       build_color_glyph;
+
+       result:=true;
+
+      end
+     else
      if m_last_error = 0 then
       begin
        if m_flip_y then
@@ -1485,6 +1514,149 @@ begin
 
 end;
 
+{ HAS_GLYPH }
+function font_engine_freetype_base.has_glyph(glyph_code : unsigned ) : boolean;
+begin
+ result:=(m_cur_face <> NIL ) and
+         (FT_Get_Char_Index(m_cur_face ,glyph_code ) <> 0 );
+
+end;
+
+{ BUILD_COLOR_GLYPH }
+procedure font_engine_freetype_base.build_color_glyph;
+var
+ bmp : FT_Bitmap_ptr;
+ src : int8u_ptr;
+ pitch : int;
+ srcW ,srcH : int;
+ outW ,outH : int;
+ outLeft ,outTop : int;
+ strike_ppem ,target_ppem : int;
+ scale : double;
+ need : unsigned;
+ hp : ^longint;
+ dst : int8u_ptr;
+ ox ,oy ,c : int;
+ fx ,fy ,dx ,dy : double;
+ x0 ,y0 ,x1 ,y1 : int;
+ p00 ,p01 ,p10 ,p11 : int8u_ptr;
+ v : double;
+
+ function sample(sx ,sy ,ch : int ) : int8u_ptr;
+ begin
+  if sx < 0 then sx:=0;
+  if sy < 0 then sy:=0;
+  if sx > srcW - 1 then sx:=srcW - 1;
+  if sy > srcH - 1 then sy:=srcH - 1;
+  result:=int8u_ptr(ptrcomp(src ) + sy * pitch + sx * 4 + ch );
+ end;
+
+begin
+ bmp:=@m_cur_face.glyph.bitmap;
+ src:=int8u_ptr(bmp^.buffer );
+ pitch:=bmp^.pitch;
+ srcW:=bmp^.width;
+ srcH:=bmp^.rows;
+
+ { Requested pixel size vs the actual strike size FreeType selected. }
+ target_ppem:=m_height shr 6;
+ strike_ppem:=m_cur_face.size^.metrics.y_ppem;
+
+ if (strike_ppem > 0 ) and (target_ppem > 0 ) then
+  scale:=target_ppem / strike_ppem
+ else
+  scale:=1.0;
+
+ if (srcW <= 0 ) or (srcH <= 0 ) or (src = NIL ) then
+  begin
+   { Empty glyph (e.g. a space in a colour font): cache a header only. }
+   outW:=0;
+   outH:=0;
+   need:=16;
+   if m_color_size < need then
+    begin
+     if m_color_data <> NIL then
+      agg_freemem(pointer(m_color_data ) ,m_color_size );
+     agg_getmem(pointer(m_color_data ) ,need );
+     m_color_size:=need;
+    end;
+   hp:=pointer(m_color_data );
+   hp^:=0; Inc(hp ); hp^:=0; Inc(hp ); hp^:=0; Inc(hp ); hp^:=0;
+   m_data_size:=need;
+   m_data_type:=glyph_data_color;
+   m_bounds.Construct(0 ,0 ,0 ,0 );
+   m_advance_x:=int26p6_to_dbl(m_cur_face.glyph.advance.x ) * scale;
+   m_advance_y:=0.0;
+   exit;
+  end;
+
+ outW:=Round(srcW * scale );
+ outH:=Round(srcH * scale );
+ if outW < 1 then outW:=1;
+ if outH < 1 then outH:=1;
+
+ need:=16 + unsigned(outW ) * unsigned(outH ) * 4;
+ if m_color_size < need then
+  begin
+   if m_color_data <> NIL then
+    agg_freemem(pointer(m_color_data ) ,m_color_size );
+   agg_getmem(pointer(m_color_data ) ,need );
+   m_color_size:=need;
+  end;
+
+ outLeft:=Round(m_cur_face.glyph.bitmap_left * scale );
+ outTop :=Round(m_cur_face.glyph.bitmap_top  * scale );
+
+ { Header: width, height, left, top (all pixels; top = baseline->top edge). }
+ hp:=pointer(m_color_data );
+ hp^:=outW;    Inc(hp );
+ hp^:=outH;    Inc(hp );
+ hp^:=outLeft; Inc(hp );
+ hp^:=outTop;
+
+ dst:=int8u_ptr(ptrcomp(m_color_data ) + 16 );
+
+ { Bilinear downscale. FT BGRA is premultiplied, so interpolating the raw
+   channel values is correct. Output stays premultiplied BGRA. }
+ for oy:=0 to outH - 1 do
+  for ox:=0 to outW - 1 do
+   begin
+    fx:=(ox + 0.5 ) / scale - 0.5;
+    fy:=(oy + 0.5 ) / scale - 0.5;
+    x0:=Floor(fx );
+    y0:=Floor(fy );
+    dx:=fx - x0;
+    dy:=fy - y0;
+    x1:=x0 + 1;
+    y1:=y0 + 1;
+
+    for c:=0 to 3 do
+     begin
+      p00:=sample(x0 ,y0 ,c );
+      p10:=sample(x1 ,y0 ,c );
+      p01:=sample(x0 ,y1 ,c );
+      p11:=sample(x1 ,y1 ,c );
+      v:=p00^ * (1 - dx ) * (1 - dy ) +
+         p10^ * dx * (1 - dy ) +
+         p01^ * (1 - dx ) * dy +
+         p11^ * dx * dy;
+      if v < 0 then v:=0;
+      if v > 255 then v:=255;
+      dst^:=int8u(Round(v ) );
+      inc(ptrcomp(dst ) );
+     end;
+   end;
+
+ m_data_size:=need;
+ m_data_type:=glyph_data_color;
+ m_bounds.Construct(outLeft ,outTop ,outLeft + outW ,outTop + outH );
+ m_advance_x:=int26p6_to_dbl(m_cur_face.glyph.advance.x ) * scale;
+ if m_advance_x <= 0 then
+  m_advance_x:=outW;
+ m_advance_y:=0.0;
+
+end;
+
 { DATA_SIZE }
 function font_engine_freetype_base.data_size : unsigned;
 begin
@@ -1538,6 +1710,10 @@ begin
     else
      m_path16.serialize(data );
 
+   glyph_data_color :
+    if m_color_data <> NIL then
+     move(m_color_data^ ,data^ ,m_data_size );
+
   end;
 
 end;
@@ -1584,9 +1760,43 @@ end;
 
 { UPDATE_CHAR_SIZE }
 procedure font_engine_freetype_base.update_char_size;
+var
+ target ,best ,best_diff ,diff ,ppem ,i : int;
+ sizes : FT_Bitmap_Size_ptr;
 begin
  if m_cur_face <> NIL then
   begin
+   { Colour/bitmap fonts (e.g. Noto Color Emoji) are not scalable and only
+     provide a handful of fixed strikes; FT_Set_Pixel_Sizes with an arbitrary
+     size fails on them. Select the nearest available strike instead. }
+   if ((m_cur_face^.face_flags and FT_FACE_FLAG_SCALABLE ) = 0 ) and
+      (m_cur_face^.num_fixed_sizes > 0 ) then
+    begin
+     target:=m_height shr 6;
+     if target <= 0 then
+      target:=m_width shr 6;
+     if target <= 0 then
+      target:=1;
+
+     sizes:=m_cur_face^.available_sizes;
+     best:=0;
+     best_diff:=high(int );
+     for i:=0 to m_cur_face^.num_fixed_sizes - 1 do
+      begin
+       ppem:=sizes^[i].y_ppem shr 6;
+       if ppem <= 0 then
+        ppem:=sizes^[i].height;
+       diff:=Abs(ppem - target );
+       if diff < best_diff then
+        begin
+         best_diff:=diff;
+         best:=i;
+        end;
+      end;
+
+     FT_Select_Size(m_cur_face ,best );
+    end
+   else
    if m_resolution <> 0 then
     FT_Set_Char_Size(
      m_cur_face ,

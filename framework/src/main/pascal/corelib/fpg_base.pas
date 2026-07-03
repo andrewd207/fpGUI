@@ -344,6 +344,11 @@ type
     procedure   DrawTextToBuffer(ABuf: PByte; AStride, ABufW, ABufH,
                   AX, AY: Integer; const AText: string; AColor: TfpgColor;
                   AClipX1, AClipY1, AClipX2, AClipY2: Integer); virtual;
+    { True if the font (or a fallback) can render ACodePoint (a Unicode
+      codepoint). Backends without glyph introspection return True. }
+    function    HasGlyph(ACodePoint: Cardinal): boolean; virtual;
+    { True only if every character of AText (UTF-8) can be rendered. }
+    function    HasGlyphs(const AText: string): boolean;
     property    FontDesc: string read FFontDesc;
   end;
 
@@ -3441,6 +3446,65 @@ procedure TfpgFontResourceBase.DrawTextToBuffer(ABuf: PByte;
 begin
   { Default no-op: native font resources (X11, GDI) do not render to
     pixel buffers. Override in AggCanvas font resources. }
+end;
+
+function TfpgFontResourceBase.HasGlyph(ACodePoint: Cardinal): boolean;
+begin
+  { Default: assume available. Backends that can introspect the font
+    (the FreeType/hybrid resource) override this. }
+  Result := True;
+end;
+
+function TfpgFontResourceBase.HasGlyphs(const AText: string): boolean;
+var
+  i, len: Integer;
+  b, cp: Cardinal;
+  extra: Integer;
+begin
+  Result := True;
+  i := 1;
+  len := Length(AText);
+  while i <= len do
+  begin
+    { Minimal UTF-8 decode of one codepoint. }
+    b := Ord(AText[i]);
+    if b < $80 then
+    begin
+      cp := b;
+      extra := 0;
+    end
+    else if (b and $E0) = $C0 then
+    begin
+      cp := b and $1F;
+      extra := 1;
+    end
+    else if (b and $F0) = $E0 then
+    begin
+      cp := b and $0F;
+      extra := 2;
+    end
+    else if (b and $F8) = $F0 then
+    begin
+      cp := b and $07;
+      extra := 3;
+    end
+    else
+    begin
+      { Invalid lead byte — skip it. }
+      Inc(i);
+      Continue;
+    end;
+    Inc(i);
+    while (extra > 0) and (i <= len) and ((Ord(AText[i]) and $C0) = $80) do
+    begin
+      cp := (cp shl 6) or (Ord(AText[i]) and $3F);
+      Inc(i);
+      Dec(extra);
+    end;
+
+    if not HasGlyph(cp) then
+      Exit(False);
+  end;
 end;
 
 

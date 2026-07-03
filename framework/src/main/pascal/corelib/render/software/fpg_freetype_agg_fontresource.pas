@@ -41,6 +41,7 @@ type
     function GetDescent: integer; override;
     function GetHeight: integer; override;
     function GetTextWidth(const txt: string): integer; override;
+    function HasGlyph(ACodePoint: Cardinal): boolean; override;
     procedure DrawTextToBuffer(ABuf: PByte; AStride, ABufW, ABufH,
       AX, AY: Integer; const AText: string; AColor: TfpgColor;
       AClipX1, AClipY1, AClipX2, AClipY2: Integer); override;
@@ -90,6 +91,11 @@ end;
 function TfpgFreeTypeFontResource.GetTextWidth(const txt: string): integer;
 begin
   Result := FGlyphCache.TextWidth(txt);
+end;
+
+function TfpgFreeTypeFontResource.HasGlyph(ACodePoint: Cardinal): boolean;
+begin
+  Result := FGlyphCache.HasGlyph(ACodePoint);
 end;
 
 procedure TfpgFreeTypeFontResource.DrawTextToBuffer(ABuf: PByte;
