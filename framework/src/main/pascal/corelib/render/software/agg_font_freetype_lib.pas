@@ -75,6 +75,11 @@ const
   FT_FACE_FLAG_MULTIPLE_MASTERS = 1 shl 8;
   FT_FACE_FLAG_GLYPH_NAMES = 1 shl 9;
   FT_FACE_FLAG_EXTERNAL_STREAM = 1 shl 10;
+  FT_FACE_FLAG_HINTER = 1 shl 11;
+  FT_FACE_FLAG_CID_KEYED = 1 shl 12;
+  FT_FACE_FLAG_TRICKY = 1 shl 13;
+  FT_FACE_FLAG_COLOR = 1 shl 14;   // face has embedded colour (CBDT/sbix/COLR) glyphs
+  FT_FACE_FLAG_VARIATION = 1 shl 15;
 
   FT_STYLE_FLAG_ITALIC = 1 shl 0;
   FT_STYLE_FLAG_BOLD = 1 shl 1;

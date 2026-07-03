@@ -119,7 +119,10 @@ uses
   agg_font_freetype,
   agg_font_freetype_lib,
   agg_font_engine,
-  agg_font_cache_manager;
+  agg_font_cache_manager
+  {$IFDEF UNIX}
+  , process   { for the optional fc-match query — see QueryFontconfigEmoji }
+  {$ENDIF};
 
 
 type
@@ -396,6 +399,66 @@ begin
     (cp = $3297)  or (cp = $3299);
 end;
 
+{ True if the font file at APath actually carries embedded colour glyphs
+  (CBDT/sbix/COLR). Used to vet the fontconfig result so we never prefer a
+  monochrome font as the "emoji" source. Cheap: opens the face, reads a flag. }
+function FaceHasColor(const APath: string): Boolean;
+var
+  lib: FT_Library_ptr;
+  face: FT_Face_ptr;
+begin
+  Result := False;
+  lib := nil;
+  if FT_Init_FreeType(lib) <> 0 then
+    Exit;
+  try
+    if FT_New_Face(lib, PChar(APath), 0, face) = 0 then
+    begin
+      Result := (face^.face_flags and FT_FACE_FLAG_COLOR) <> 0;
+      FT_Done_Face(face);
+    end;
+  finally
+    FT_Done_FreeType(lib);
+  end;
+end;
+
+{ On Unix, ask fontconfig (via fc-match) for the file of the system's
+  configured colour-emoji font, using fontconfig's generic "emoji" family.
+  This is more robust than a hardcoded family list because it honours the
+  user's fontconfig setup regardless of what the emoji font is named.
+
+  The result is only accepted if the font genuinely has colour glyphs, so a
+  misconfigured system that resolves "emoji" to a text font is ignored rather
+  than preferred. Fails gracefully (returns False) if fc-match is missing or
+  errors — the caller then relies on the hardcoded family list. No-op on
+  non-Unix. }
+function QueryFontconfigEmoji(out APath: string): Boolean;
+{$IFDEF UNIX}
+var
+  outstr: string;
+{$ENDIF}
+begin
+  Result := False;
+  APath := '';
+  {$IFDEF UNIX}
+  outstr := '';
+  try
+    if RunCommand('fc-match', ['-f', '%{file}', 'emoji'], outstr) then
+    begin
+      outstr := Trim(outstr);
+      if (outstr <> '') and FileExists(outstr) and FaceHasColor(outstr) then
+      begin
+        APath := outstr;
+        Result := True;
+      end;
+    end;
+  except
+    { fc-match / fontconfig unavailable — ignore and fall back to the list. }
+    Result := False;
+  end;
+  {$ENDIF}
+end;
+
 procedure TGlyphCache.ResolveFallbacks;
 var
   i, idx, n: Integer;
@@ -420,7 +483,20 @@ begin
   FFallbacksResolved := True;
 
   n := 0;
-  SetLength(FFallbacks, Length(FALLBACK_FAMILIES));
+  SetLength(FFallbacks, Length(FALLBACK_FAMILIES) + 1);  { +1 for the fc-match result }
+
+  { Preferred emoji source: whatever fontconfig says (Unix only). Placed first
+    so it wins over the hardcoded guesses; deduped against the list below. }
+  if QueryFontconfigEmoji(path) and (path <> '') and not AlreadyHave(path) then
+  begin
+    FFallbacks[n].Path := path;
+    FFallbacks[n].EngPtr := nil;
+    FFallbacks[n].CachePtr := nil;
+    FFallbacks[n].LoadedPx := -1;
+    FFallbacks[n].PreferForEmoji := True;
+    Inc(n);
+  end;
+
   for i := 0 to High(FALLBACK_FAMILIES) do
   begin
     fnt := TFontCacheItem.Create('');
