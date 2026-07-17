@@ -2401,7 +2401,15 @@ end;
 
 procedure TfpgWindowBase.SetWindowOpacity(AValue: Single);
 begin
-  FWindowOpacity:=AValue;
+  { Clamp to the valid 0.0 (fully transparent) .. 1.0 (fully opaque) range and
+    store. The base does no rendering; a backend that supports per-window
+    translucency (Wayland) overrides this to push the value to its compositor
+    surface. X11/GDI leave it a harmless no-op. }
+  if AValue < 0.0 then
+    AValue := 0.0
+  else if AValue > 1.0 then
+    AValue := 1.0;
+  FWindowOpacity := AValue;
 end;
 
 function TfpgWindowBase.GetPrimaryWidget: TfpgWidgetBase;
@@ -2715,6 +2723,7 @@ begin
   FMouseCursor := mcDefault;
   FMouseCursorIsDirty := False;
   FWindowState := wsNormal;
+  FWindowOpacity := 1.0;   { fully opaque by default }
   FDropableWidgets := TFPList.Create;
   FWindowAttributes := [waSizeable];
 end;

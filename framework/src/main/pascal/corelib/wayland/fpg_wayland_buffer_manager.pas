@@ -269,9 +269,11 @@ end;
 procedure TWaylandBufferManager.Present(ABufIdx: Integer; x, y, w, h: TfpgCoord);
 var
   L, T, R, B: Integer;
-  row: Integer;
+  row, col: Integer;
   win: TfpgWaylandWindow;
   buf: TfpgwBuffer;
+  op, na: Integer;
+  src, dst: PByte;
 begin
   buf := FPresent[ABufIdx];
   if not buf.Allocated[FBufWidth, FBufHeight] then
@@ -297,14 +299,49 @@ begin
     dma-buf backend pads each row to a 256-byte boundary. Copy row by row
     honouring both strides, and bracket the write with Begin/EndAccess so the
     dma-buf backend can flush CPU caches (DMA_BUF_IOCTL_SYNC) — a no-op for shm. }
+  { Per-window opacity: 255 (opaque) keeps the fast raw copy; anything less
+    scales every pixel by op as it is copied into the present buffer. The scale
+    is a single linear pass over the finished frame (never per-primitive), and
+    it writes ONLY into the present buffer — FMaster persists across frames and
+    holds accumulated content, so scaling it in place would compound each frame. }
+  op := 255;
+  if Assigned(FWindow) then
+    op := TfpgWaylandWindow(FWindow).Opacity255;
+
   buf.BeginAccess;
-  if buf.Stride = FStride then
-    Move(FMaster^, buf.Data^, FStride * FBufHeight)
+  if op >= 255 then
+  begin
+    { Opaque: unchanged fast path. }
+    if buf.Stride = FStride then
+      Move(FMaster^, buf.Data^, FStride * FBufHeight)
+    else
+      for row := 0 to FBufHeight - 1 do
+        Move((PByte(FMaster) + row * FStride)^,
+             (PByte(buf.Data) + row * buf.Stride)^,
+             FBufWidth * 4);
+  end
   else
+  begin
+    { Translucent: copy row by row, scaling each BGRA/ARGB pixel by op. wl_shm
+      ARGB is PREMULTIPLIED (see PremultiplyBGRA in fpg_wayland.pas); scaling
+      both the colour bytes and the alpha byte by na keeps that invariant.
+      na := a*op/255; dst.rgb := src.rgb*na/255; dst.a := na. }
     for row := 0 to FBufHeight - 1 do
-      Move((PByte(FMaster) + row * FStride)^,
-           (PByte(buf.Data) + row * buf.Stride)^,
-           FBufWidth * 4);
+    begin
+      src := PByte(FMaster) + row * FStride;
+      dst := PByte(buf.Data) + row * buf.Stride;
+      for col := 0 to FBufWidth - 1 do
+      begin
+        na := src[3] * op div 255;
+        dst[0] := src[0] * na div 255;
+        dst[1] := src[1] * na div 255;
+        dst[2] := src[2] * na div 255;
+        dst[3] := na;
+        Inc(src, 4);
+        Inc(dst, 4);
+      end;
+    end;
+  end;
   buf.EndAccess;
   buf.Busy := True;
 

@@ -3264,8 +3264,11 @@ begin
     Exit;
   inherited SetWindowOpacity(AValue);
 
+  { Apply live if the X window exists; otherwise the stored (clamped)
+    WindowOpacity is pushed at realize time in DoAllocateWindowHandle. Use the
+    clamped WindowOpacity (not the raw AValue) so both paths agree. }
   if FWinHandle <> 0 then
-     xapplication.netlayer.WindowSetAlpha(FWinHandle,AValue);
+     xapplication.netlayer.WindowSetAlpha(FWinHandle, WindowOpacity);
 end;
 
 procedure TfpgX11Window.DoSetWindowAttributes(const AOldAtributes, ANewAttributes: TWindowAttributes; const AForceAll: Boolean);
