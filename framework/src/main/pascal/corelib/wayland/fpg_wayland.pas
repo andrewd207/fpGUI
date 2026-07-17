@@ -90,6 +90,10 @@ type
       wl_subsurface.set_position relative to the parent surface. }
     FIsSubSurface: Boolean;
     FSubParent: TfpgWaylandWindow;  { parent backend window (to commit subsurface position) }
+    { Per-window opacity as a 0..255 byte (255 = fully opaque). Kept alongside
+      the base's Single WindowOpacity so the buffer manager can read a ready-made
+      integer scale factor at present time without a float multiply per pixel. }
+    FOpacity255: Byte;
     procedure DecoratorConfigure(Sender: TObject; AEdges: LongWord; AWidth,
       AHeight: LongInt);
     procedure DecoratorPaint(Sender: TObject);
@@ -166,6 +170,9 @@ type
     { Decoration state exposed for custom drawers. }
     property    Title: String read FWindowTitle;
     property    HoverButton: TfpgwTitleButton read FHoverButton;
+    { Current window opacity as a 0..255 byte (255 = opaque). Read by
+      TWaylandBufferManager.Present to scale the finished frame in one pass. }
+    property    Opacity255: Byte read FOpacity255;
   end;
 
 
@@ -275,6 +282,12 @@ type
     { Window that currently holds keyboard focus — the target for synthesized
       key-repeat events (Wayland makes the client do its own key repeat). }
     FKeyRepeatWin: TObject;
+    { Keysym of the key currently held down (0 = none). Tracked so that a
+      keyboard-leave, which per the Wayland protocol logically releases every
+      held key, can stop the client-side repeat and synthesize the release the
+      old window will otherwise never receive (the real release goes to whoever
+      took focus). Without this a focus-changing keypress repeats forever. }
+    FHeldKeySym: xkb_keysym_t;
     FShiftState: TShiftState;
     FPopupStack: TFPList;
     { Buffer managers with a deferred (coalesced) present pending. Flushed once
@@ -1353,7 +1366,15 @@ end;
 
 procedure TfpgWaylandWindow.SetWindowOpacity(AValue: Single);
 begin
+  { Base clamps AValue to 0..1 and stores FWindowOpacity. }
   inherited SetWindowOpacity(AValue);
+  FOpacity255 := Round(WindowOpacity * 255);
+  { Apply immediately even if the content is unchanged: invalidate the whole
+    content region so the paint path re-presents the surface. Present() re-copies
+    the entire master into the present buffer every frame, scaling by FOpacity255,
+    so a full invalidate is all that's needed for the new opacity to take effect. }
+  if (Owner is TfpgWidget) then
+    TfpgWidget(Owner).InvalidateRect(fpgRect(0, 0, Width, Height));
 end;
 
 function TfpgWaylandWindow.GetBufferDrawOffset: DWord;
@@ -2108,6 +2129,7 @@ constructor TfpgWaylandWindow.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
   FSizeable := True;
+  FOpacity255 := 255;   { fully opaque until SetWindowOpacity says otherwise }
 end;
 
 destructor TfpgWaylandWindow.Destroy;
@@ -2570,6 +2592,7 @@ begin
     TWlKeyboard.TKeyState.keReleased:
       begin
         TfpgTimer(FKeyTimer).Enabled:=False;
+        FHeldKeySym := 0;
         msg := FPGM_KEYRELEASE;
         if FKeyboard.ComposeStatus = XKB_COMPOSE_COMPOSED then
         begin
@@ -2587,6 +2610,7 @@ begin
   if msg = FPGM_KEYPRESS then
   begin
     FKeyRepeatWin := Sender;  { route repeats to the focused window }
+    FHeldKeySym := lKeySym;   { for the leave-triggers-release fixup }
     StartRepeatDelay(lKeySym);
     { Don't emit a typed character for Ctrl/Alt combos — those are shortcuts
       (e.g. Ctrl+F), not text input. Shift/AltGr already produce the right
@@ -2606,7 +2630,25 @@ begin
 end;
 
 procedure TfpgWaylandApplication.SendKeyboardLeaveMessage(Sender: TObject);
+var
+  msgp: TfpgMessageParams;
 begin
+  { Per the Wayland protocol every held key is logically released when the
+    keyboard leaves. Stop the client-side repeat and, if a key was down,
+    synthesize the FPGM_KEYRELEASE the old window will otherwise never see (the
+    compositor delivers the real release to whoever now holds focus). Do this
+    even on a decoration-grab leave so a key held during a titlebar drag can't
+    repeat forever. }
+  if Assigned(FKeyTimer) then
+    TfpgTimer(FKeyTimer).Enabled := False;
+  if (FHeldKeySym <> 0) and Assigned(FKeyRepeatWin) then
+  begin
+    msgp.keyboard.keycode := KeySymToKeycode(FHeldKeySym);
+    msgp.keyboard.shiftstate := ShiftStateForEvent;
+    fpgPostMessage(nil, FKeyRepeatWin, FPGM_KEYRELEASE, msgp);
+    FHeldKeySym := 0;
+  end;
+
   if FSuppressDeactivate then
   begin
     FSuppressDeactivate := False;
